@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "  C",
+    " S ",
+    "S  "
+  ],
+  "key": {
+    "C": "excelcomputer:excel_computer",
+    "S": "minecraft:stick"
+  },
+  "result": {
+    "id": "excelcomputer:excel_on_a_stick",
+    "count": 1
+  }
+}

@@ -1,0 +1,18 @@
+
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "PPP",
+    "W W",
+    "PPP"
+  ],
+  "key": {
+    "P": "#minecraft:planks",
+    "W": "minecraft:paper"
+  },
+  "result": {
+    "id": "excelcomputer:excel_computer",
+    "count": 1
+  }
+}
