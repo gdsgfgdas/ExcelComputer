@@ -2,7 +2,7 @@
 mod.id = "excelcomputer"
 mod.name = "Excel Computer"
 mod.group = "com.example.excelcomputer"
-mod.version = "1.0.0"
+mod.version = "1.0.2"
 
 deps.fabric_loader = "0.18.1"
 loomx.loom_version = "1.18-SNAPSHOT"

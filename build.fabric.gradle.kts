@@ -32,19 +32,24 @@ repositories {
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
 }
 
-// Libraries bundled inside the mod jar. Minecraft already provides log4j, and
-// POI's own (newer) copy conflicts with the older log4j in some versions
-// (the game crashes at startup), so it is excluded here.
+// Libraries bundled inside the mod jar. Minecraft already ships log4j, commons-io
+// and commons-codec, and the game uses ITS copies at runtime (a newer copy
+// nested in a mod does not replace them), so they are left out here. POI 5.2.5
+// is used (not 5.4.1) because it works with the older commons-io that
+// Minecraft 1.21.1 ships; 5.4.1 needs a newer commons-io and crashes with
+// NoSuchMethodError outside the development environment.
 val bundledLibraries = listOf(
-    "org.apache.poi:poi-ooxml:5.4.1",
-    "org.apache.poi:poi:5.4.1",
-    "org.apache.xmlbeans:xmlbeans:5.3.0",
+    "org.apache.poi:poi-ooxml:5.2.5",
+    "org.apache.poi:poi:5.2.5",
+    "org.apache.xmlbeans:xmlbeans:5.2.0",
     "org.apache.commons:commons-collections4:4.4",
-    "org.apache.poi:poi-ooxml-lite:5.4.1",
+    "org.apache.poi:poi-ooxml-lite:5.2.5",
     "org.apache.commons:commons-math3:3.6.1"
 ).map { notation ->
     (dependencies.create(notation) as ExternalModuleDependency).apply {
         exclude(group = "org.apache.logging.log4j")
+        exclude(group = "commons-io")
+        exclude(group = "commons-codec")
     }
 }
 

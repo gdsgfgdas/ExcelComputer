@@ -1,6 +1,8 @@
 plugins {
     id("net.neoforged.moddev") version "2.0.147"
     id("neoforge-mutex")
+    // Bundles the libraries into the mod jar and renames some of their packages
+    id("com.gradleup.shadow") version "9.3.1"
 }
 
 version = "${property("mod.version")}+${sc.current.version}"
@@ -13,6 +15,8 @@ val requiredJava = when {
     sc.current.parsed >= "1.17" -> JavaVersion.VERSION_16
     else -> JavaVersion.VERSION_1_8
 }
+
+val shadowBundle by configurations.creating
 
 repositories {
     /**
@@ -27,30 +31,28 @@ repositories {
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
 }
 
-// Apache POI (reads and writes .xlsx files), bundled inside the mod jar with
-// jar-in-jar. Each library is listed on its own, with the version range the
-// mod accepts. Libraries Minecraft already provides (log4j, commons-io,
-// commons-codec) are left out on purpose, because two copies of the same
-// package make NeoForge refuse to start. POI 5.2.5 is used here (not 5.4.1)
-// because it works with the older commons-io that Minecraft 1.21.1 ships;
-// 5.4.1 needs a newer commons-io and crashes with NoSuchMethodError.
+// Apache POI (reads and writes .xlsx files) is shaded into the mod jar, and the
+// commons libraries it needs are moved to private package names ("relocated").
+// Other mods (for example Iris) bundle their own copies of some of these under
+// the original names, and NeoForge refuses to start when two mods contain the
+// same package. Libraries Minecraft already provides (log4j, commons-io,
+// commons-codec) are left out on purpose. POI 5.2.5 is used (not 5.4.1) because
+// it works with the older commons-io that Minecraft 1.21.1 ships. Each library
+// version below is the one POI 5.2.5 itself declares (for example commons-compress
+// 1.25.0; 1.24.0 makes saving crash with NoSuchMethodError: putArchiveEntry).
 val bundledLibraries = listOf(
-    Triple("org.apache.poi:poi", "5.2.5", "[5.2.5,6)"),
-    Triple("org.apache.poi:poi-ooxml", "5.2.5", "[5.2.5,6)"),
-    Triple("org.apache.poi:poi-ooxml-lite", "5.2.5", "[5.2.5,6)"),
-    Triple("org.apache.xmlbeans:xmlbeans", "5.2.0", "[5.2.0,6)"),
-    Triple("org.apache.commons:commons-collections4", "4.4", "[4.4,5)"),
-    Triple("org.apache.commons:commons-math3", "3.6.1", "[3.6.1,4)"),
-    Triple("org.apache.commons:commons-compress", "1.24.0", "[1.24.0,2)"),
-    Triple("com.zaxxer:SparseBitSet", "1.3", "[1.3,2)"),
-    Triple("com.github.virtuald:curvesapi", "1.08", "[1.08,2)")
-).map { (coordinates, preferred, range) ->
+    "org.apache.poi:poi:5.2.5",
+    "org.apache.poi:poi-ooxml:5.2.5",
+    "org.apache.poi:poi-ooxml-lite:5.2.5",
+    "org.apache.xmlbeans:xmlbeans:5.2.0",
+    "org.apache.commons:commons-collections4:4.4",
+    "org.apache.commons:commons-math3:3.6.1",
+    "org.apache.commons:commons-compress:1.25.0",
+    "com.zaxxer:SparseBitSet:1.3",
+    "com.github.virtuald:curvesapi:1.08"
+).map { coordinates ->
     (dependencies.create(coordinates) as ExternalModuleDependency).apply {
         isTransitive = false
-        version {
-            strictly(range)
-            prefer(preferred)
-        }
     }
 }
 
@@ -81,11 +83,11 @@ neoForge {
 dependencies {
     for (library in bundledLibraries) {
         implementation(library)
-        jarJar(library)
+        add(shadowBundle.name, library)
 
-        // Up to 1.21.8, NeoForge only loads extra libraries in the dev game
-        // if they are on this list as well.
-        if (sc.current.parsed < "1.21.9") add("additionalRuntimeClasspath", library)
+        if (sc.current.parsed < "1.21.9") {
+            add("additionalRuntimeClasspath", library)
+        }
     }
 }
 
@@ -139,6 +141,41 @@ tasks {
         dependsOn("stonecutterGenerate")
     }
 
+    // The shaded jar (below) is the real mod jar; the plain jar is only an intermediate step.
+    jar {
+        archiveClassifier = "slim"
+    }
+
+    shadowJar {
+        archiveClassifier = ""
+        configurations = listOf(shadowBundle)
+        // Only bundle the libraries listed at the top of this file (not Minecraft,
+        // NeoForge or anything else on the classpath).
+        dependencies {
+            for (library in bundledLibraries) {
+                include(dependency("${library.group}:${library.name}"))
+            }
+        }
+
+        // Give our private copies of these libraries their own package names so
+        // they cannot clash with the same libraries bundled by other mods.
+        relocate("org.apache.commons.collections4", "com.example.excelcomputer.libs.collections4")
+        relocate("org.apache.commons.math3", "com.example.excelcomputer.libs.math3")
+        relocate("org.apache.commons.compress", "com.example.excelcomputer.libs.compress")
+
+        mergeServiceFiles()
+
+        // Keep the license and notice text of the bundled libraries (Apache License 2.0)
+        append("META-INF/NOTICE")
+        append("META-INF/NOTICE.txt")
+        append("META-INF/LICENSE")
+        append("META-INF/LICENSE.txt")
+
+        exclude("net/neoforged/neoforge/**")
+        exclude("module-info.class", "META-INF/versions/*/module-info.class")
+        exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
+    }
+
     // Includes the license file in the built mod
     withType<Jar> {
         val name = project.property("mod.id")
@@ -151,7 +188,7 @@ tasks {
         description = "Builds mod jars and copies results to `build/libs/{mod version}/`"
 
         inputs.property("version", project.property("mod.version"))
-        from(jar.flatMap { it.archiveFile }, named<Jar>("sourcesJar").flatMap { it.archiveFile })
+        from(shadowJar.flatMap { it.archiveFile }, named<Jar>("sourcesJar").flatMap { it.archiveFile })
         into(rootProject.layout.buildDirectory.file("libs/${project.property("mod.version")}"))
     }
 }

@@ -5,7 +5,7 @@
   "name": "${name}",
   "description": "Edit real Excel workbooks inside Minecraft.",
   "authors": [
-    "Me!"
+    "Reverend Brown with Claude AI"
   ],
   "license": "CC0-1.0",
   "environment": "*",

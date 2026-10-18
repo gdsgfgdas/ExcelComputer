@@ -7,7 +7,7 @@ loaderVersion="[1,)"
 modId = "${id}"
 displayName = "${name}"
 version = "${version}"
-authors = "Me!"
+authors = "ReverendBrown with Claude AI"
 description = "Edit real Excel workbooks inside Minecraft."
 
 [[dependencies.${id}]]
