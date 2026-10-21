@@ -85,6 +85,11 @@ loom {
         runDirectory = rootProject.file("run/${project.name}") // One run directory per version, so Gradle can tell the versions apart
         jvmArguments.add("-Dmixin.debug.export=true") // Exports transformed classes for debugging
     }
+    // The dedicated server gets its own folder, so it can run next to the client
+    // without sharing log files and settings.
+    runConfigs.named("server") {
+        runDirectory = rootProject.file("run/${project.name}-server")
+    }
 }
 
 java {

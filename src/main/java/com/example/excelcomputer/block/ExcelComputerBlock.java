@@ -1,8 +1,6 @@
-
 package com.example.excelcomputer.block;
 
-import com.example.excelcomputer.WorkbookPickerScreen;
-import net.minecraft.client.Minecraft;
+import com.example.excelcomputer.ClientHooks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -26,9 +24,7 @@ public class ExcelComputerBlock extends Block {
             BlockHitResult hit
     ) {
         if (level.isClientSide()) {
-            Minecraft.getInstance().setScreen(
-                    new WorkbookPickerScreen()
-            );
+            ClientHooks.openWorkbookPicker.run();
         }
 
         return InteractionResult.SUCCESS;

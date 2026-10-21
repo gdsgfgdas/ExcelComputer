@@ -72,11 +72,15 @@ neoForge {
         }
 
         register("server") {
-            gameDirectory = rootProject.file("run/${project.name}")
+            gameDirectory = rootProject.file("run/${project.name}-server")
             server()
         }
     }
 }
+
+// The dev server never opens a workbook, and a dedicated server does not ship commons-codec,
+// which POI's module descriptor requires. So the libraries are left out of the dev server.
+val isServerRun = gradle.startParameter.taskNames.any { it.endsWith("runServer") }
 
 // This block comes after neoForge { } on purpose: the NeoForge plugin only
 // creates the "additionalRuntimeClasspath" configuration once its version is set.
@@ -85,7 +89,7 @@ dependencies {
         implementation(library)
         add(shadowBundle.name, library)
 
-        if (sc.current.parsed < "1.21.9") {
+        if (sc.current.parsed < "1.21.9" && !isServerRun) {
             add("additionalRuntimeClasspath", library)
         }
     }

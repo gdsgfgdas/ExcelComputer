@@ -25,9 +25,12 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.DateTimeException;
+import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class WorkbookManager implements AutoCloseable {
@@ -116,7 +119,10 @@ public class WorkbookManager implements AutoCloseable {
     ) {
         Cell existing = findCell(sheetIndex, rowIndex, columnIndex);
         int previous = existing == null ? 0 : existing.getCellStyle().getIndex();
-        int target = deriveStyle(previous, change);
+        CellFormat.Change effective = change.kind() == CellFormat.Kind.DECIMALS
+                ? decimalChange(existing, previous, change.value())
+                : change;
+        int target = deriveStyle(previous, effective);
 
         if (target == previous) {
             return null;
@@ -179,6 +185,7 @@ public class WorkbookManager implements AutoCloseable {
                 font.getUnderline() != Font.U_NONE,
                 Math.max(1, Math.round(font.getFontHeightInPoints())),
                 alignmentCode(style.getAlignment()),
+                style.getDataFormatString() == null ? "General" : style.getDataFormatString(),
                 false
         );
     }
@@ -261,9 +268,132 @@ public class WorkbookManager implements AutoCloseable {
                 return format.fontPoints() == change.value();
             case ALIGN:
                 return format.hAlign() == change.value();
+            case NUMBER_FORMAT:
+                return format.numberFormat().equals(change.text());
             default:
                 return false;
         }
+    }
+
+    // ----- increase / decrease decimal places -----
+
+    // Works out the new number format for "more decimals" (+1) or "fewer decimals" (-1).
+    private CellFormat.Change decimalChange(Cell cell, int styleIndex, int delta) {
+        String format = formatOfStyle(styleIndex).numberFormat();
+        String updated;
+
+        if ("General".equalsIgnoreCase(format)) {
+            // Start from the decimals the cell shows now.
+            int decimals = displayedDecimals(cell);
+            int wanted = Math.max(0, decimals + delta);
+
+            updated = wanted == decimals ? "General"
+                    : wanted == 0 ? "0" : "0." + "0".repeat(wanted);
+        } else {
+            updated = adjustDecimals(format, delta);
+        }
+
+        return new CellFormat.Change(CellFormat.Kind.NUMBER_FORMAT, 0, updated);
+    }
+
+    private int displayedDecimals(Cell cell) {
+        if (cell == null) {
+            return 0;
+        }
+
+        String text;
+
+        try {
+            text = formatter.formatCellValue(cell, evaluator);
+        } catch (RuntimeException exception) {
+            return 0;
+        }
+
+        int dot = text.indexOf('.');
+        int count = 0;
+
+        if (dot < 0) {
+            return 0;
+        }
+
+        for (int i = dot + 1; i < text.length() && Character.isDigit(text.charAt(i)); i++) {
+            count++;
+        }
+
+        return count;
+    }
+
+    private static String adjustDecimals(String format, int delta) {
+        String[] sections = format.split(";", -1);
+
+        for (int i = 0; i < sections.length; i++) {
+            sections[i] = adjustSection(sections[i], delta);
+        }
+
+        return String.join(";", sections);
+    }
+
+    // Adds or removes one 0 after the decimal point of one section of a format code.
+    private static String adjustSection(String section, int delta) {
+        boolean quoted = false;
+        boolean bracketed = false;
+        int dot = -1;
+        int lastDigit = -1;
+
+        for (int i = 0; i < section.length(); i++) {
+            char c = section.charAt(i);
+
+            if (c == '"') {
+                quoted = !quoted;
+            } else if (quoted) {
+                continue;
+            } else if (c == '[') {
+                bracketed = true;
+            } else if (c == ']') {
+                bracketed = false;
+            } else if (bracketed) {
+                continue;
+            } else if ((c == 'E' || c == 'e') && i + 1 < section.length()
+                    && (section.charAt(i + 1) == '+' || section.charAt(i + 1) == '-')) {
+                break;
+            } else if (c == '.' && dot < 0) {
+                dot = i;
+            } else if (c == '0' || c == '#') {
+                lastDigit = i;
+            } else if ("ydhsYDHS".indexOf(c) >= 0) {
+                return section; // a date or time: nothing to change
+            }
+        }
+
+        if (lastDigit < 0) {
+            return section;
+        }
+
+        int zeros = 0;
+
+        if (dot >= 0) {
+            while (dot + 1 + zeros < section.length() && section.charAt(dot + 1 + zeros) == '0') {
+                zeros++;
+            }
+        }
+
+        if (delta > 0) {
+            if (dot >= 0) {
+                int at = dot + 1 + zeros;
+
+                return section.substring(0, at) + "0" + section.substring(at);
+            }
+
+            return section.substring(0, lastDigit + 1) + ".0" + section.substring(lastDigit + 1);
+        }
+
+        if (dot >= 0 && zeros > 0) {
+            String decimals = zeros > 1 ? "." + "0".repeat(zeros - 1) : "";
+
+            return section.substring(0, dot) + decimals + section.substring(dot + 1 + zeros);
+        }
+
+        return section;
     }
 
     // The index of the style that is the given style plus the change. Created once, then reused.
@@ -276,7 +406,7 @@ public class WorkbookManager implements AutoCloseable {
             return baseIndex;
         }
 
-        String key = baseIndex + "|" + change.kind() + ":" + change.value();
+        String key = baseIndex + "|" + change.kind() + ":" + change.value() + ":" + change.text();
         Integer known = derivedStyles.get(key);
 
         if (known != null) {
@@ -298,6 +428,9 @@ public class WorkbookManager implements AutoCloseable {
                     style.setFillForegroundColor(color(change.value()));
                     style.setFillPattern(FillPatternType.SOLID_FOREGROUND);
                 }
+                break;
+            case NUMBER_FORMAT:
+                style.setDataFormat(book.createDataFormat().getFormat(change.text()));
                 break;
             case ALIGN:
                 style.setAlignment(alignmentOf(change.value()));
@@ -443,9 +576,13 @@ public class WorkbookManager implements AutoCloseable {
                     if (DateUtil.isCellDateFormatted(cell)) {
                         return getCellText(sheetIndex, rowIndex, columnIndex);
                     }
-                    return BigDecimal.valueOf(cell.getNumericCellValue())
-                            .stripTrailingZeros()
-                            .toPlainString();
+                    BigDecimal number = BigDecimal.valueOf(cell.getNumericCellValue());
+
+                    if (cell.getCellStyle().getDataFormatString().contains("%")) {
+                        return number.movePointRight(2).stripTrailingZeros().toPlainString() + "%";
+                    }
+
+                    return number.stripTrailingZeros().toPlainString();
                 case BOOLEAN:
                     return cell.getBooleanCellValue() ? "TRUE" : "FALSE";
                 case STRING:
@@ -479,18 +616,20 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    public void setCellValue(
+    /** Returns {previousStyle, newStyle} if typing also set a number format (like "$5"), else null. */
+    public int[] setCellValue(
             int sheetIndex,
             int rowIndex,
             int columnIndex,
             String value
     ) {
-        setCellValueDeferred(sheetIndex, rowIndex, columnIndex, value);
+        int[] styles = setCellValueDeferred(sheetIndex, rowIndex, columnIndex, value);
         recalculate();
+        return styles;
     }
 
     /** Writes a cell without recalculating. Call recalculate() afterwards. */
-    public void setCellValueDeferred(
+    public int[] setCellValueDeferred(
             int sheetIndex,
             int rowIndex,
             int columnIndex,
@@ -508,7 +647,31 @@ public class WorkbookManager implements AutoCloseable {
             cell = row.createCell(columnIndex);
         }
 
-        writeValue(cell, value);
+        String impliedFormat = writeValue(cell, value);
+
+        if (impliedFormat == null) {
+            return null;
+        }
+
+        // Typing "$5" or "50%" also gives the cell that number format, unless it already has one.
+        int current = cell.getCellStyle().getIndex();
+
+        if (!"General".equalsIgnoreCase(formatOfStyle(current).numberFormat())) {
+            return null;
+        }
+
+        int target = deriveStyle(
+                current,
+                new CellFormat.Change(CellFormat.Kind.NUMBER_FORMAT, 0, impliedFormat)
+        );
+
+        if (target == current) {
+            return null;
+        }
+
+        cell.setCellStyle(workbook.getCellStyleAt(target));
+
+        return new int[] {current, target};
     }
 
     /** Recalculates all formulas when possible. */
@@ -521,29 +684,182 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    private static void writeValue(Cell cell, String value) {
+    // Writes the typed text into the cell. Returns the number format the text
+    // implies (for example "$5" implies a currency format), or null.
+    private static String writeValue(Cell cell, String value) {
         String text = value.trim();
 
         if (text.startsWith("=") && text.length() > 1) {
             // The formula is validated before the cell changes, so an
             // invalid formula throws and leaves the old content untouched.
             cell.setCellFormula(text.substring(1));
-            return;
+            return null;
         }
 
         // Clears any old formula or value before writing the new one.
         cell.setBlank();
 
         if (text.isEmpty()) {
-            return;
+            return null;
         }
 
         if (text.equalsIgnoreCase("TRUE") || text.equalsIgnoreCase("FALSE")) {
             cell.setCellValue(text.toUpperCase(Locale.ROOT).equals("TRUE"));
-        } else if (NUMBER.matcher(text).matches()) {
+            return null;
+        }
+
+        TypedNumber typed = parseTyped(text);
+
+        if (typed != null) {
+            cell.setCellValue(typed.value());
+            return typed.format();
+        }
+
+        if (NUMBER.matcher(text).matches()) {
             cell.setCellValue(Double.parseDouble(text));
         } else {
             cell.setCellValue(value);
+        }
+
+        return null;
+    }
+
+    // ----- typed numbers: $5, 12.5%, 1,234, (5), dates and times -----
+
+    private record TypedNumber(double value, String format) {
+    }
+
+    private static final Pattern PERCENT =
+            Pattern.compile("([-+]?(?:\\d+\\.?\\d*|\\.\\d+))\\s*%");
+    private static final Pattern CURRENCY =
+            Pattern.compile("([-+]?)\\$\\s*([-+]?)(\\d{1,3}(?:,\\d{3})+|\\d+)(\\.\\d+)?");
+    private static final Pattern THOUSANDS =
+            Pattern.compile("([-+]?)(\\d{1,3}(?:,\\d{3})+)(\\.\\d+)?");
+    private static final Pattern US_DATE =
+            Pattern.compile("(\\d{1,2})/(\\d{1,2})/(\\d{4}|\\d{2})");
+    private static final Pattern ISO_DATE =
+            Pattern.compile("(\\d{4})-(\\d{1,2})-(\\d{1,2})");
+    private static final Pattern TIME =
+            Pattern.compile("(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*([AaPp][Mm])?");
+
+    // Understands what Excel understands when you type into a General cell.
+    // Returns null when the text is not one of these (it is then plain text or a plain number).
+    private static TypedNumber parseTyped(String text) {
+        // (5) and ($5.00) mean -5 and -$5.00
+        if (text.length() > 2 && text.startsWith("(") && text.endsWith(")")) {
+            TypedNumber inner = parseTypedBody(text.substring(1, text.length() - 1).trim(), true);
+
+            return inner == null ? null : new TypedNumber(-inner.value(), inner.format());
+        }
+
+        return parseTypedBody(text, false);
+    }
+
+    private static TypedNumber parseTypedBody(String text, boolean allowPlain) {
+        Matcher m = PERCENT.matcher(text);
+
+        if (m.matches()) {
+            double number = Double.parseDouble(m.group(1)) / 100.0;
+
+            return new TypedNumber(number, m.group(1).contains(".") ? "0.00%" : "0%");
+        }
+
+        m = CURRENCY.matcher(text);
+
+        if (m.matches()) {
+            double number = Double.parseDouble(
+                    m.group(3).replace(",", "") + (m.group(4) == null ? "" : m.group(4)));
+
+            if ("-".equals(m.group(1)) || "-".equals(m.group(2))) {
+                number = -number;
+            }
+
+            return new TypedNumber(
+                    number, m.group(4) == null ? "\"$\"#,##0" : "\"$\"#,##0.00");
+        }
+
+        m = THOUSANDS.matcher(text);
+
+        if (m.matches()) {
+            double number = Double.parseDouble(
+                    m.group(2).replace(",", "") + (m.group(3) == null ? "" : m.group(3)));
+
+            if ("-".equals(m.group(1))) {
+                number = -number;
+            }
+
+            return new TypedNumber(number, m.group(3) == null ? "#,##0" : "#,##0.00");
+        }
+
+        m = US_DATE.matcher(text);
+
+        if (m.matches()) {
+            int year = Integer.parseInt(m.group(3));
+
+            if (m.group(3).length() == 2) {
+                year += year < 30 ? 2000 : 1900;
+            }
+
+            return date(year, Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)));
+        }
+
+        m = ISO_DATE.matcher(text);
+
+        if (m.matches()) {
+            return date(
+                    Integer.parseInt(m.group(1)),
+                    Integer.parseInt(m.group(2)),
+                    Integer.parseInt(m.group(3))
+            );
+        }
+
+        m = TIME.matcher(text);
+
+        if (m.matches()) {
+            int hours = Integer.parseInt(m.group(1));
+            int minutes = Integer.parseInt(m.group(2));
+            int seconds = m.group(3) == null ? 0 : Integer.parseInt(m.group(3));
+            String meridiem = m.group(4);
+
+            if (meridiem != null) {
+                if (hours < 1 || hours > 12) {
+                    return null;
+                }
+
+                boolean pm = meridiem.equalsIgnoreCase("pm");
+
+                if (pm && hours < 12) {
+                    hours += 12;
+                } else if (!pm && hours == 12) {
+                    hours = 0;
+                }
+            } else if (hours > 23) {
+                return null;
+            }
+
+            if (minutes > 59 || seconds > 59) {
+                return null;
+            }
+
+            String format = (m.group(3) == null ? "h:mm" : "h:mm:ss")
+                    + (meridiem == null ? "" : " AM/PM");
+
+            return new TypedNumber((hours * 3600 + minutes * 60 + seconds) / 86400.0, format);
+        }
+
+        if (allowPlain && NUMBER.matcher(text).matches()) {
+            return new TypedNumber(Double.parseDouble(text), null);
+        }
+
+        return null;
+    }
+
+    private static TypedNumber date(int year, int month, int day) {
+        try {
+            return new TypedNumber(
+                    DateUtil.getExcelDate(LocalDate.of(year, month, day)), "m/d/yyyy");
+        } catch (DateTimeException exception) {
+            return null;
         }
     }
 

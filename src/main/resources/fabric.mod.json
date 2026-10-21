@@ -12,6 +12,9 @@
   "entrypoints": {
     "main": [
       "com.example.excelcomputer.ExcelComputerFabric"
+    ],
+    "client": [
+      "com.example.excelcomputer.ExcelComputerFabricClient"
     ]
   },
   "depends": {

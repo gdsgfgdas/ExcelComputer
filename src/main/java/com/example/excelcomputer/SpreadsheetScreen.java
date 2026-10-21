@@ -1,6 +1,7 @@
 package com.example.excelcomputer;
 
 import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
@@ -15,7 +16,6 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
 import org.lwjgl.glfw.GLFW;
-
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
 
 public class SpreadsheetScreen extends Screen {
     private static final int GRID_X = 45;
-    private static final int GRID_Y = 106;
+    private static final int GRID_Y = 130;
     // Top of the Home ribbon's buttons.
     private static final int RIBBON_Y = 72;
     private static final int BASE_CELL_WIDTH = 70;
@@ -43,6 +43,9 @@ public class SpreadsheetScreen extends Screen {
 
     // How close (in pixels) the mouse must be to a header edge to grab it.
     private static final int RESIZE_GRAB = 4;
+
+    // The GUI size this screen always uses, whatever the video setting says.
+    private static final int FIXED_GUI_SCALE = 2;
 
     // Largest range that Delete/Backspace will clear in one go.
     private static final long MAX_CLEAR_CELLS = 10_000;
@@ -110,6 +113,9 @@ public class SpreadsheetScreen extends Screen {
     // True once the workbook opened, so the view is only saved for a workbook that was shown.
     private boolean opened;
 
+    // True while this screen has replaced the game's GUI size with its own.
+    private boolean guiScaleOverridden;
+
     // Home ribbon: the color popup and the colors the main buttons apply.
     private final ColorPalette palette = new ColorPalette();
     private int lastFillColor = 0xFFFF00;
@@ -117,6 +123,8 @@ public class SpreadsheetScreen extends Screen {
     private int fillButtonX;
     private int textButtonX;
     private int sizeLabelX;
+    private final FormatMenu formatMenu = new FormatMenu();
+    private int formatButtonX;
 
     // Copy/cut data: the raw input of every copied cell (formulas as "=...").
     private String[][] clipboardInputs;
@@ -162,6 +170,7 @@ public class SpreadsheetScreen extends Screen {
     public SpreadsheetScreen(Path workbookPath) {
         super(Component.literal("Excel Computer"));
         this.workbookPath = workbookPath;
+        applyGuiScale();
 
         try {
             manager = WorkbookManager.open(workbookPath);
@@ -825,7 +834,25 @@ public class SpreadsheetScreen extends Screen {
         refreshEditor();
         return true;
     }
+    // Popups (color palette, number format list) must be drawn in front of the grid text.
+    // Text is batched separately from boxes, so drawing later is not enough to be on top.
+    //? if >=1.21.6 {
+    private static void beginOverlay(GuiGraphics graphics) {
+        graphics.nextStratum();
+    }
 
+    private static void endOverlay(GuiGraphics graphics) {
+    }
+    //?} else {
+    /*private static void beginOverlay(GuiGraphics graphics) {
+        graphics.pose().pushPose();
+        graphics.pose().translate(0f, 0f, 400f);
+    }
+
+    private static void endOverlay(GuiGraphics graphics) {
+        graphics.pose().popPose();
+    }
+    *///?}
     //? if >=1.21.6 {
     private static void pushTextScale(GuiGraphics graphics, float x, float y, float scale) {
         graphics.pose().pushMatrix();
@@ -883,8 +910,9 @@ public class SpreadsheetScreen extends Screen {
 
     // Shared by every Minecraft version. Returns true when the key was used.
     private boolean handleKey(int key, boolean ctrl, boolean shift) {
-        if (palette.isOpen() && key == GLFW.GLFW_KEY_ESCAPE) {
+        if ((palette.isOpen() || formatMenu.isOpen()) && key == GLFW.GLFW_KEY_ESCAPE) {
             palette.close();
+            formatMenu.close();
             return true;
         }
 
@@ -1416,7 +1444,7 @@ public class SpreadsheetScreen extends Screen {
                 }
 
                 try {
-                    manager.setCellValueDeferred(
+                    int[] styles = manager.setCellValueDeferred(
                             sheetIndex, targetRow, targetColumn, input
                     );
 
@@ -1424,6 +1452,13 @@ public class SpreadsheetScreen extends Screen {
                             sheetIndex, targetRow, targetColumn,
                             previous, input, hasEarlierEdit
                     ));
+
+                    if (styles != null) {
+                        undoHistory.push(new CellEdit(
+                                sheetIndex, targetRow, targetColumn, "", "",
+                                true, styles[0], styles[1]
+                        ));
+                    }
 
                     hasEarlierEdit = true;
                     changed++;
@@ -1847,6 +1882,18 @@ public class SpreadsheetScreen extends Screen {
             int button,
             boolean shift
     ) {
+        // The number format list is a popup too.
+        if (formatMenu.isOpen() && button == 0) {
+            int item = formatMenu.itemAt(mouseX, mouseY);
+
+            if (item >= 0) {
+                applyNumberFormat(FormatMenu.ITEMS.get(item).format());
+            }
+
+            formatMenu.close();
+            return true;
+        }
+
         // The color palette is a popup: the next click picks a color or closes it.
         if (palette.isOpen() && button == 0) {
             int picked = palette.colorAt(mouseX, mouseY);
@@ -2139,7 +2186,7 @@ public class SpreadsheetScreen extends Screen {
         );
 
         try {
-            manager.setCellValue(
+            int[] styles = manager.setCellValue(
                     sheetIndex,
                     selectedRow,
                     selectedColumn,
@@ -2147,6 +2194,14 @@ public class SpreadsheetScreen extends Screen {
             );
 
             undoHistory.push(edit);
+
+            if (styles != null) {
+                // Typing "$5" or "50%" also set a number format; undo takes it back too.
+                undoHistory.push(new CellEdit(
+                        sheetIndex, selectedRow, selectedColumn, "", "",
+                        true, styles[0], styles[1]
+                ));
+            }
 
             // A new edit invalidates the redo history.
             redoHistory.clear();
@@ -2237,9 +2292,20 @@ public class SpreadsheetScreen extends Screen {
             String tip,
             Runnable action
     ) {
+        addRibbonButton(x, RIBBON_Y + 3, width, label, tip, action);
+    }
+
+    private void addRibbonButton(
+            int x,
+            int y,
+            int width,
+            Component label,
+            String tip,
+            Runnable action
+    ) {
         this.addRenderableWidget(
                 Button.builder(label, button -> action.run())
-                        .bounds(x, RIBBON_Y + 3, width, 20)
+                        .bounds(x, y, width, 20)
                         .tooltip(Tooltip.create(Component.literal(tip)))
                         .build()
         );
@@ -2302,14 +2368,55 @@ public class SpreadsheetScreen extends Screen {
         addRibbonButton(x, 46, Component.literal("Clear"),
                 "Clear formatting",
                 () -> applyFormat(new CellFormat.Change(CellFormat.Kind.RESET, 0)));
+
+        // Second row: number formats
+        int y2 = RIBBON_Y + 3 + 24;
+        int x2 = 14;
+
+        formatButtonX = x2;
+        final int menuX = x2;
+        addRibbonButton(x2, y2, 104, Component.literal(""),
+                "Number format",
+                () -> toggleFormatMenu(menuX));
+        x2 += 104 + 8;
+        addRibbonButton(x2, y2, 22, Component.literal("$"), "Currency format",
+                () -> applyNumberFormat("\"$\"#,##0.00"));
+        x2 += 24;
+        addRibbonButton(x2, y2, 22, Component.literal("%"), "Percent format",
+                () -> applyNumberFormat("0%"));
+        x2 += 24;
+        addRibbonButton(x2, y2, 22, Component.literal(","), "Thousands separator",
+                () -> applyNumberFormat("#,##0.00"));
+        x2 += 22 + 8;
+        addRibbonButton(x2, y2, 30, Component.literal("+.0"), "More decimal places",
+                () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, 1)));
+        x2 += 32;
+        addRibbonButton(x2, y2, 30, Component.literal("-.0"), "Fewer decimal places",
+                () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, -1)));
     }
 
     private void togglePalette(ColorPalette.Target target, int anchorX) {
+        formatMenu.close();
+
         if (palette.isOpen() && palette.target() == target) {
             palette.close();
         } else {
             palette.open(target, anchorX, RIBBON_Y + 26, this.width);
         }
+    }
+
+    private void toggleFormatMenu(int anchorX) {
+        palette.close();
+
+        if (formatMenu.isOpen()) {
+            formatMenu.close();
+        } else {
+            formatMenu.open(anchorX, RIBBON_Y + 3 + 24 + 22, this.width);
+        }
+    }
+
+    private void applyNumberFormat(String format) {
+        applyFormat(new CellFormat.Change(CellFormat.Kind.NUMBER_FORMAT, 0, format));
     }
 
     // A color picked in the palette; NONE means "No fill" / "Automatic".
@@ -2452,10 +2559,67 @@ public class SpreadsheetScreen extends Screen {
                 sizeLabelX, RIBBON_Y + 9, 0xFFFFFFFF
         );
 
+        // The dropdown button shows the name of the active cell's number format.
+        graphics.drawString(
+                this.font,
+                FormatMenu.nameOf(activeFormat().numberFormat()) + " v",
+                formatButtonX + 6, RIBBON_Y + 3 + 24 + 6, 0xFFFFFFFF
+        );
+
+        beginOverlay(graphics);
         palette.render(graphics, this.font, mouseX, mouseY);
+        formatMenu.render(graphics, this.font, mouseX, mouseY, activeFormat().numberFormat());
+        endOverlay(graphics);
     }
 
     // ----- remembering the view between visits -----
+
+    // ----- fixed GUI size -----
+
+    // GUI size 2, or the largest size that fits when the window is small.
+    private static int fixedGuiScale(Minecraft minecraft) {
+        int largestThatFits = minecraft.getWindow().calculateScale(0, minecraft.isEnforceUnicode());
+
+        return Math.max(1, Math.min(FIXED_GUI_SCALE, largestThatFits));
+    }
+
+    // Runs before the screen is shown, so the screen is laid out at the fixed size.
+    private void applyGuiScale() {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        minecraft.getWindow().setGuiScale(fixedGuiScale(minecraft));
+        guiScaleOverridden = true;
+    }
+
+    // Puts the GUI size from the video settings back (the next screen is set up after this).
+    private void restoreGuiScale() {
+        if (!guiScaleOverridden) {
+            return;
+        }
+
+        guiScaleOverridden = false;
+
+        Minecraft minecraft = Minecraft.getInstance();
+
+        minecraft.getWindow().setGuiScale(minecraft.getWindow().calculateScale(
+                minecraft.options.guiScale().get(), minecraft.isEnforceUnicode()));
+    }
+
+    // Resizing the window resets the GUI size, so put ours back.
+    @Override
+    public void resize(Minecraft minecraft, int width, int height) {
+        if (!guiScaleOverridden) {
+            super.resize(minecraft, width, height);
+            return;
+        }
+
+        minecraft.getWindow().setGuiScale(fixedGuiScale(minecraft));
+        super.resize(
+                minecraft,
+                minecraft.getWindow().getGuiScaledWidth(),
+                minecraft.getWindow().getGuiScaledHeight()
+        );
+    }
 
     // Brings back the zoom, sheet, selected cell and scroll position from last time.
     private void restoreViewState() {
@@ -2504,6 +2668,7 @@ public class SpreadsheetScreen extends Screen {
     // Called whenever this screen is closed or replaced.
     @Override
     public void removed() {
+        restoreGuiScale();
         saveViewState();
         super.removed();
     }
