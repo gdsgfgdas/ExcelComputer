@@ -16,7 +16,6 @@ import org.apache.poi.xssf.usermodel.XSSFCellStyle;
 import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFFont;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -32,6 +31,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 public class WorkbookManager implements AutoCloseable {
     // Plain decimal numbers only (so "1d", "NaN" or hex floats stay text).
@@ -41,6 +43,8 @@ public class WorkbookManager implements AutoCloseable {
     private final Workbook workbook;
     private final DataFormatter formatter = new DataFormatter();
     private final FormulaEvaluator evaluator;
+    private final boolean csvMode;
+    private final List<List<String>> csvRows = new ArrayList<>();
 
     // The formatting of each cell style in the workbook, looked up once per style.
     private final Map<Integer, CellFormat> formatCache = new HashMap<>();
@@ -49,25 +53,38 @@ public class WorkbookManager implements AutoCloseable {
 
     private WorkbookManager(Workbook workbook) {
         this.workbook = workbook;
-        this.evaluator = workbook.getCreationHelper().createFormulaEvaluator();
+        this.evaluator = workbook == null
+                ? null
+                : workbook.getCreationHelper().createFormulaEvaluator();
+        this.csvMode = workbook == null;
     }
 
     public static WorkbookManager open(Path path) throws IOException {
-        // Only .xlsx files are listed, so the .xlsx reader is used directly.
-        // (WorkbookFactory looks its readers up with a service lookup, which
-        // does not find them when the mod is loaded inside some modpacks.)
+        String filename = path.getFileName()
+                .toString()
+                .toLowerCase(Locale.ROOT);
+
+        if (filename.endsWith(".csv")) {
+            WorkbookManager manager = new WorkbookManager(null);
+
+            try {
+                manager.csvRows.addAll(readCsv(path));
+                return manager;
+            } catch (IOException | RuntimeException exception) {
+                manager.close();
+                throw exception;
+            }
+        }
+
         try (InputStream input = Files.newInputStream(path)) {
             return new WorkbookManager(new XSSFWorkbook(input));
         } catch (RuntimeException exception) {
-            // POI reports unreadable files with several different exception types.
             throw new IOException(
                     "The workbook is password-protected, damaged or not a valid .xlsx file ("
                             + exception.getClass().getSimpleName() + ")",
                     exception
             );
         } catch (LinkageError error) {
-            // A missing or mismatched library (for example NoSuchMethodError)
-            // is reported on screen instead of crashing the game.
             throw new IOException(
                     "A library the mod needs could not be loaded ("
                             + error.getClass().getSimpleName() + ")",
@@ -76,18 +93,96 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
+    // Read CSV path finder
+    private static List<List<String>> readCsv(Path path) throws IOException {
+        List<List<String>> rows = new ArrayList<>();
+
+        try (var reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            StringBuilder field = new StringBuilder();
+            List<String> row = new ArrayList<>();
+            boolean insideQuotes = false;
+            int current;
+
+            while ((current = reader.read()) != -1) {
+                char c = (char) current;
+
+                if (insideQuotes) {
+                    if (c == '"') {
+                        reader.mark(1);
+                        int next = reader.read();
+
+                        if (next == '"') {
+                            field.append('"');
+                        } else {
+                            insideQuotes = false;
+
+                            if (next != -1) {
+                                reader.reset();
+                            }
+                        }
+                    } else {
+                        field.append(c);
+                    }
+                } else if (c == '"') {
+                    insideQuotes = true;
+                } else if (c == ',') {
+                    row.add(field.toString());
+                    field.setLength(0);
+                } else if (c == '\n' || c == '\r') {
+                    row.add(field.toString());
+                    field.setLength(0);
+
+                    rows.add(row);
+                    row = new ArrayList<>();
+
+                    if (c == '\r') {
+                        reader.mark(1);
+                        int next = reader.read();
+
+                        if (next != '\n' && next != -1) {
+                            reader.reset();
+                        }
+                    }
+                } else {
+                    field.append(c);
+                }
+            }
+
+            if (insideQuotes) {
+                throw new IOException("The CSV file contains an unclosed quoted field.");
+            }
+
+            if (!row.isEmpty() || field.length() > 0) {
+                row.add(field.toString());
+                rows.add(row);
+            }
+        }
+
+        return rows;
+    }
+
     public int getSheetCount() {
-        return workbook.getNumberOfSheets();
+        return csvMode ? 1 : workbook.getNumberOfSheets();
     }
 
     public String getSheetName(int index) {
+        if (csvMode) {
+            if (index != 0) {
+                throw new IndexOutOfBoundsException("CSV files only have one sheet.");
+            }
+
+            return "CSV Data";
+        }
+
         return workbook.getSheetName(index);
     }
-
     // ----- cell formatting (fill color, text color, bold, ...) -----
 
-    /** How a cell is formatted. Cells without any formatting get the defaults. */
+    /**
+     * How a cell is formatted. Cells without any formatting get the defaults.
+     */
     public CellFormat getCellFormat(int sheetIndex, int rowIndex, int columnIndex) {
+        if (csvMode) return CellFormat.DEFAULT;
         Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
 
         if (cell == null) {
@@ -117,6 +212,7 @@ public class WorkbookManager implements AutoCloseable {
             int columnIndex,
             CellFormat.Change change
     ) {
+        if (csvMode) return null;
         Cell existing = findCell(sheetIndex, rowIndex, columnIndex);
         int previous = existing == null ? 0 : existing.getCellStyle().getIndex();
         CellFormat.Change effective = change.kind() == CellFormat.Kind.DECIMALS
@@ -131,11 +227,14 @@ public class WorkbookManager implements AutoCloseable {
         getOrCreateCell(sheetIndex, rowIndex, columnIndex)
                 .setCellStyle(workbook.getCellStyleAt(target));
 
-        return new int[] {previous, target};
+        return new int[]{previous, target};
     }
 
-    /** Puts a cell back to a style index (used by undo and redo). */
+    /**
+     * Puts a cell back to a style index (used by undo and redo).
+     */
     public void setCellStyleIndex(int sheetIndex, int rowIndex, int columnIndex, int styleIndex) {
+        if (csvMode) return;
         getOrCreateCell(sheetIndex, rowIndex, columnIndex)
                 .setCellStyle(workbook.getCellStyleAt(styleIndex));
     }
@@ -213,7 +312,7 @@ public class WorkbookManager implements AutoCloseable {
 
     private static XSSFColor color(int rgb) {
         return new XSSFColor(
-                new byte[] {(byte) (rgb >> 16), (byte) (rgb >> 8), (byte) rgb},
+                new byte[]{(byte) (rgb >> 16), (byte) (rgb >> 8), (byte) rgb},
                 null
         );
     }
@@ -499,8 +598,11 @@ public class WorkbookManager implements AutoCloseable {
 
     private static final int MAX_COLUMN_UNITS = 255 * 256;
 
-    /** Column width in pixels, as stored in the file (or the sheet's default). */
+    /**
+     * Column width in pixels, as stored in the file (or the sheet's default).
+     */
     public int getColumnWidthPixels(int sheetIndex, int columnIndex) {
+        if (csvMode) return 70;
         try {
             return Math.max(1, Math.round(
                     workbook.getSheetAt(sheetIndex).getColumnWidthInPixels(columnIndex)));
@@ -509,8 +611,11 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    /** Row height in pixels, as stored in the file (or the sheet's default). */
+    /**
+     * Row height in pixels, as stored in the file (or the sheet's default).
+     */
     public int getRowHeightPixels(int sheetIndex, int rowIndex) {
+        if (csvMode) return 20;
         try {
             Sheet sheet = workbook.getSheetAt(sheetIndex);
             Row row = sheet.getRow(rowIndex);
@@ -525,6 +630,7 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     public void setColumnWidthPixels(int sheetIndex, int columnIndex, int pixels) {
+        if (csvMode) return;
         int units = (int) Math.round(pixels * 256.0 / 7.0);
 
         workbook.getSheetAt(sheetIndex).setColumnWidth(
@@ -532,6 +638,7 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     public void setRowHeightPixels(int sheetIndex, int rowIndex, int pixels) {
+        if (csvMode) return;
         Sheet sheet = workbook.getSheetAt(sheetIndex);
         Row row = sheet.getRow(rowIndex);
 
@@ -562,6 +669,10 @@ public class WorkbookManager implements AutoCloseable {
             int rowIndex,
             int columnIndex
     ) {
+        if (csvMode) {
+            return getCsvCell(sheetIndex, rowIndex, columnIndex);
+        }
+
         Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
 
         if (cell == null) {
@@ -576,6 +687,7 @@ public class WorkbookManager implements AutoCloseable {
                     if (DateUtil.isCellDateFormatted(cell)) {
                         return getCellText(sheetIndex, rowIndex, columnIndex);
                     }
+
                     BigDecimal number = BigDecimal.valueOf(cell.getNumericCellValue());
 
                     if (cell.getCellStyle().getDataFormatString().contains("%")) {
@@ -597,12 +709,34 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    /** The formatted text shown inside the grid cell. */
+    private String getCsvCell(
+            int sheetIndex,
+            int rowIndex,
+            int columnIndex
+    ) {
+        if (sheetIndex != 0
+                || rowIndex < 0
+                || columnIndex < 0
+                || rowIndex >= csvRows.size()
+                || columnIndex >= csvRows.get(rowIndex).size()) {
+            return "";
+        }
+
+        return csvRows.get(rowIndex).get(columnIndex);
+    }
+
+    /**
+     * The formatted text shown inside the grid cell.
+     */
     public String getCellText(
             int sheetIndex,
             int rowIndex,
             int columnIndex
     ) {
+        if (csvMode) {
+            return getCsvCell(sheetIndex, rowIndex, columnIndex);
+        }
+
         Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
 
         if (cell == null) {
@@ -616,7 +750,9 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    /** Returns {previousStyle, newStyle} if typing also set a number format (like "$5"), else null. */
+    /**
+     * Returns {previousStyle, newStyle} if typing also set a number format (like "$5"), else null.
+     */
     public int[] setCellValue(
             int sheetIndex,
             int rowIndex,
@@ -628,13 +764,34 @@ public class WorkbookManager implements AutoCloseable {
         return styles;
     }
 
-    /** Writes a cell without recalculating. Call recalculate() afterwards. */
+    /**
+     * Writes a cell without recalculating. Call recalculate() afterwards.
+     */
     public int[] setCellValueDeferred(
             int sheetIndex,
             int rowIndex,
             int columnIndex,
             String value
     ) {
+        if (csvMode) {
+            if (sheetIndex != 0 || rowIndex < 0 || columnIndex < 0) {
+                throw new IndexOutOfBoundsException("Invalid CSV cell position.");
+            }
+
+            while (csvRows.size() <= rowIndex) {
+                csvRows.add(new ArrayList<>());
+            }
+
+            List<String> row = csvRows.get(rowIndex);
+
+            while (row.size() <= columnIndex) {
+                row.add("");
+            }
+
+            row.set(columnIndex, value);
+            return null;
+        }
+
         Sheet sheet = workbook.getSheetAt(sheetIndex);
 
         Row row = sheet.getRow(rowIndex);
@@ -653,7 +810,6 @@ public class WorkbookManager implements AutoCloseable {
             return null;
         }
 
-        // Typing "$5" or "50%" also gives the cell that number format, unless it already has one.
         int current = cell.getCellStyle().getIndex();
 
         if (!"General".equalsIgnoreCase(formatOfStyle(current).numberFormat())) {
@@ -671,10 +827,67 @@ public class WorkbookManager implements AutoCloseable {
 
         cell.setCellStyle(workbook.getCellStyleAt(target));
 
-        return new int[] {current, target};
+        return new int[]{current, target};
     }
 
-    /** Recalculates all formulas when possible. */
+    private void saveCsv(Path path) throws IOException {
+        Path temp = path.resolveSibling(path.getFileName() + ".tmp");
+
+        try (var writer = Files.newBufferedWriter(
+                temp,
+                StandardCharsets.UTF_8
+        )) {
+            for (int r = 0; r < csvRows.size(); r++) {
+                List<String> row = csvRows.get(r);
+
+                for (int c = 0; c < row.size(); c++) {
+                    if (c > 0) {
+                        writer.write(',');
+                    }
+
+                    String value = row.get(c);
+
+                    boolean quote = value.contains(",")
+                            || value.contains("\"")
+                            || value.contains("\n")
+                            || value.contains("\r");
+
+                    if (quote) {
+                        writer.write('"');
+                        writer.write(value.replace("\"", "\"\""));
+                        writer.write('"');
+                    } else {
+                        writer.write(value);
+                    }
+                }
+
+                if (r < csvRows.size() - 1) {
+                    writer.write("\r\n");
+                }
+            }
+        } catch (IOException | RuntimeException exception) {
+            Files.deleteIfExists(temp);
+            throw exception;
+        }
+
+        try {
+            Files.move(
+                    temp,
+                    path,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE
+            );
+        } catch (AtomicMoveNotSupportedException exception) {
+            Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException exception) {
+            Files.deleteIfExists(temp);
+            throw exception;
+        }
+    }
+
+    /**
+     * Recalculates all formulas when possible.
+     */
     public void recalculate() {
         try {
             evaluator.clearAllCachedResultValues();
@@ -868,6 +1081,10 @@ public class WorkbookManager implements AutoCloseable {
      * so a failed save can't corrupt the existing workbook.
      */
     public void save(Path path) throws IOException {
+        if (csvMode) {
+            saveCsv(path);
+            return;
+        }
         Path temp = path.resolveSibling(path.getFileName() + ".tmp");
 
         try (OutputStream output = Files.newOutputStream(temp)) {
@@ -897,6 +1114,8 @@ public class WorkbookManager implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
-        workbook.close();
+        if (workbook != null) {
+            workbook.close();
+        }
     }
 }

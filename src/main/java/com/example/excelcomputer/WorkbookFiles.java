@@ -1,10 +1,11 @@
+
 package com.example.excelcomputer;
 
 //? if fabric {
 import net.fabricmc.loader.api.FabricLoader;
 //?} else {
 /*import net.neoforged.fml.loading.FMLPaths;
-*///?}
+ *///?}
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -18,9 +19,9 @@ public final class WorkbookFiles {
     private static final Path WORKBOOK_DIRECTORY =
             //? if fabric {
             FabricLoader.getInstance().getGameDir()
-            //?} else {
-            /*FMLPaths.GAMEDIR.get()
-            *///?}
+                    //?} else {
+                    /*FMLPaths.GAMEDIR.get()
+                     *///?}
                     .resolve("excelcomputer")
                     .resolve("workbooks");
 
@@ -38,9 +39,14 @@ public final class WorkbookFiles {
         try (Stream<Path> files = Files.list(directory)) {
             return files
                     .filter(Files::isRegularFile)
-                    .filter(path -> path.getFileName().toString()
-                            .toLowerCase(Locale.ROOT)
-                            .endsWith(".xlsx"))
+                    .filter(path -> {
+                        String filename = path.getFileName()
+                                .toString()
+                                .toLowerCase(Locale.ROOT);
+
+                        return filename.endsWith(".xlsx")
+                                || filename.endsWith(".csv");
+                    })
                     .sorted(Comparator.comparing(
                             path -> path.getFileName().toString(),
                             String.CASE_INSENSITIVE_ORDER))
@@ -48,3 +54,4 @@ public final class WorkbookFiles {
         }
     }
 }
+
