@@ -16,6 +16,7 @@ import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
 import org.lwjgl.glfw.GLFW;
+
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
@@ -124,6 +125,7 @@ public class SpreadsheetScreen extends Screen {
     private int textButtonX;
     private int sizeLabelX;
     private final FormatMenu formatMenu = new FormatMenu();
+    private final FilterMenu filterMenu = new FilterMenu();
     private int formatButtonX;
 
     // Copy/cut data: the raw input of every copied cell (formulas as "=...").
@@ -221,7 +223,10 @@ public class SpreadsheetScreen extends Screen {
     }
 
     private int rowHeight(int row) {
-        return Math.max(4, (int) Math.round(baseRowHeight(row) * zoomPercent / 100.0));
+        int base = baseRowHeight(row);
+
+        // A row hidden by a filter takes no room.
+        return base == 0 ? 0 : Math.max(4, (int) Math.round(base * zoomPercent / 100.0));
     }
 
     private int headerHeight() {
@@ -568,6 +573,7 @@ public class SpreadsheetScreen extends Screen {
         int headerHeight = headerHeight();
         int gridRight = gridRight();
         int gridBottom = gridBottom();
+        List<TableInfo> tables = manager.getTables(sheetIndex);
 
         // The header edge under the mouse (if any), so it can be highlighted.
         int hotColumn = resizingColumn >= 0 ? resizingColumn
@@ -632,6 +638,10 @@ public class SpreadsheetScreen extends Screen {
         for (int actualRow = firstVisibleRow; y < gridBottom; actualRow++, y += ch) {
             ch = rowHeight(actualRow);
 
+            if (ch == 0) {
+                continue; // hidden by a filter
+            }
+
             graphics.fill(10, y, GRID_X, y + ch, 0xFF3C4043);
             graphics.drawString(
                     this.font, Integer.toString(actualRow + 1),
@@ -649,8 +659,18 @@ public class SpreadsheetScreen extends Screen {
 
                 CellFormat format = manager.getCellFormat(sheetIndex, actualRow, actualColumn);
 
+                // Table styling: a colored header and shaded alternate rows.
+                TableInfo table = findTable(tables, actualRow, actualColumn);
+                boolean styled = table != null && table.isTable() && !table.style().isEmpty();
+                boolean tableHeader = styled && actualRow == table.top();
+                boolean hasArrow = table != null && table.filterButtons() && actualRow == table.top();
+                int arrowWidth = hasArrow ? Math.min(14, cw / 2) : 0;
+
                 int background = format.fill() >= 0
                         ? 0xFF000000 | format.fill()
+                        : tableHeader ? 0xFF000000 | tableAccent(table.style())
+                        : styled && table.bandedRows() && (actualRow - table.top()) % 2 == 1
+                                ? 0xFF000000 | lighten(tableAccent(table.style()), 0.8)
                         : (actualRow + actualColumn) % 2 == 0 ? 0xFFFFFFFF : 0xFFF7F7F7;
 
                 graphics.fill(x, y, x + cw, y + ch, background);
@@ -732,6 +752,34 @@ public class SpreadsheetScreen extends Screen {
                     }
                 }
 
+                // The filter arrow in a table's header cell (blue while a filter is on).
+                if (hasArrow) {
+                    boolean filtered = table.filteredColumns().contains(actualColumn - table.left());
+                    int arrowLeft = x + cw - arrowWidth - 2;
+                    int arrowTop = y + 2;
+                    int arrowHeight = Math.max(6, ch - 4);
+
+                    graphics.fill(arrowLeft, arrowTop, arrowLeft + arrowWidth, arrowTop + arrowHeight, 0xFF8A8A8A);
+                    graphics.fill(
+                            arrowLeft + 1, arrowTop + 1,
+                            arrowLeft + arrowWidth - 1, arrowTop + arrowHeight - 1,
+                            filtered ? 0xFF9CC3F5 : 0xFFF1F3F4
+                    );
+
+                    // A small triangle pointing down.
+                    int size = Math.max(2, Math.min(arrowWidth, arrowHeight) / 4);
+                    int centerX = arrowLeft + arrowWidth / 2;
+                    int triangleTop = arrowTop + arrowHeight / 2 - size / 2;
+
+                    for (int line = 0; line < size; line++) {
+                        graphics.fill(
+                                centerX - (size - line), triangleTop + line,
+                                centerX + (size - line) + 1, triangleTop + line + 1,
+                                0xFF3C4043
+                        );
+                    }
+                }
+
                 String value = manager.getCellText(
                         sheetIndex, actualRow, actualColumn
                 );
@@ -743,7 +791,7 @@ public class SpreadsheetScreen extends Screen {
                 float scale = textScale * format.fontPoints() / 11f;
                 Component text = Component.literal(value).withStyle(
                         Style.EMPTY
-                                .withBold(format.bold())
+                                .withBold(format.bold() || tableHeader)
                                 .withItalic(format.italic())
                                 .withUnderlined(format.underline())
                 );
@@ -757,10 +805,11 @@ public class SpreadsheetScreen extends Screen {
                         : align == 3 ? cw - 4 - textWidth : 4;
                 textX = Math.max(4f, textX);
                 int textColor = 0xFF000000
-                        | (format.fontColor() >= 0 ? format.fontColor() : 0x202124);
+                        | (format.fontColor() >= 0 ? format.fontColor()
+                        : tableHeader ? 0xFFFFFF : 0x202124);
 
                 // Clip long text to the cell instead of cutting characters.
-                graphics.enableScissor(x + 1, y + 1, x + cw - 1, y + ch - 1);
+                graphics.enableScissor(x + 1, y + 1, x + cw - 1 - (hasArrow ? arrowWidth + 2 : 0), y + ch - 1);
                 pushTextScale(
                         graphics,
                         x + textX,
@@ -796,6 +845,11 @@ public class SpreadsheetScreen extends Screen {
     ) {
         if (manager == null) {
             return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+        }
+
+        if (filterMenu.isOpen()) {
+            filterMenu.scroll(scrollY);
+            return true;
         }
 
         commitPendingEdit();
@@ -834,6 +888,7 @@ public class SpreadsheetScreen extends Screen {
         refreshEditor();
         return true;
     }
+
     // Popups (color palette, number format list) must be drawn in front of the grid text.
     // Text is batched separately from boxes, so drawing later is not enough to be on top.
     //? if >=1.21.6 {
@@ -853,6 +908,7 @@ public class SpreadsheetScreen extends Screen {
         graphics.pose().popPose();
     }
     *///?}
+
     //? if >=1.21.6 {
     private static void pushTextScale(GuiGraphics graphics, float x, float y, float scale) {
         graphics.pose().pushMatrix();
@@ -910,9 +966,11 @@ public class SpreadsheetScreen extends Screen {
 
     // Shared by every Minecraft version. Returns true when the key was used.
     private boolean handleKey(int key, boolean ctrl, boolean shift) {
-        if ((palette.isOpen() || formatMenu.isOpen()) && key == GLFW.GLFW_KEY_ESCAPE) {
+        if ((palette.isOpen() || formatMenu.isOpen() || filterMenu.isOpen())
+                && key == GLFW.GLFW_KEY_ESCAPE) {
             palette.close();
             formatMenu.close();
+            filterMenu.close();
             return true;
         }
 
@@ -1056,7 +1114,7 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
 
         rangeEndColumn = Math.max(0, rangeEndColumn + columnChange);
-        rangeEndRow = Math.max(0, rangeEndRow + rowChange);
+        rangeEndRow = stepRow(rangeEndRow, rowChange);
 
         scrollCellIntoView(rangeEndRow, rangeEndColumn);
     }
@@ -1882,6 +1940,21 @@ public class SpreadsheetScreen extends Screen {
             int button,
             boolean shift
     ) {
+        // The filter list is a popup too: it stays open while you tick values.
+        if (filterMenu.isOpen() && button == 0) {
+            FilterMenu.Result result = filterMenu.click(mouseX, mouseY);
+
+            if (result == FilterMenu.Result.APPLY) {
+                applyFilterMenu();
+            }
+
+            if (result != FilterMenu.Result.NONE) {
+                filterMenu.close();
+            }
+
+            return true;
+        }
+
         // The number format list is a popup too.
         if (formatMenu.isOpen() && button == 0) {
             int item = formatMenu.itemAt(mouseX, mouseY);
@@ -1916,6 +1989,11 @@ public class SpreadsheetScreen extends Screen {
             panStartY = mouseY;
             panStartRow = firstVisibleRow;
             panStartColumn = firstVisibleColumn;
+            return true;
+        }
+
+        // The small arrow in a table's header cell opens that column's filter list.
+        if (button == 0 && manager != null && openFilterMenuAt(mouseX, mouseY)) {
             return true;
         }
 
@@ -2102,7 +2180,7 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
 
         selectedColumn = Math.max(0, selectedColumn + columnChange);
-        selectedRow = Math.max(0, selectedRow + rowChange);
+        selectedRow = stepRow(selectedRow, rowChange);
         collapseRange();
 
         scrollSelectionIntoView();
@@ -2186,7 +2264,7 @@ public class SpreadsheetScreen extends Screen {
         );
 
         try {
-            int[] styles = manager.setCellValue(
+            int[] styles = manager.setCellValueDeferred(
                     sheetIndex,
                     selectedRow,
                     selectedColumn,
@@ -2393,10 +2471,19 @@ public class SpreadsheetScreen extends Screen {
         x2 += 32;
         addRibbonButton(x2, y2, 30, Component.literal("-.0"), "Fewer decimal places",
                 () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, -1)));
+        x2 += 32 + 10;
+        addRibbonButton(x2, y2, 44, Component.literal("Table"),
+                "Make a table from the selection (click again inside a table to turn it back into a range)",
+                this::toggleTable);
+        x2 += 46;
+        addRibbonButton(x2, y2, 44, Component.literal("Filter"),
+                "Show or hide the filter buttons",
+                this::toggleFilter);
     }
 
     private void togglePalette(ColorPalette.Target target, int anchorX) {
         formatMenu.close();
+        filterMenu.close();
 
         if (palette.isOpen() && palette.target() == target) {
             palette.close();
@@ -2407,6 +2494,7 @@ public class SpreadsheetScreen extends Screen {
 
     private void toggleFormatMenu(int anchorX) {
         palette.close();
+        filterMenu.close();
 
         if (formatMenu.isOpen()) {
             formatMenu.close();
@@ -2569,10 +2657,9 @@ public class SpreadsheetScreen extends Screen {
         beginOverlay(graphics);
         palette.render(graphics, this.font, mouseX, mouseY);
         formatMenu.render(graphics, this.font, mouseX, mouseY, activeFormat().numberFormat());
+        filterMenu.render(graphics, this.font, mouseX, mouseY);
         endOverlay(graphics);
     }
-
-    // ----- remembering the view between visits -----
 
     // ----- fixed GUI size -----
 
@@ -2621,6 +2708,236 @@ public class SpreadsheetScreen extends Screen {
         );
     }
 
+    // ----- tables and filters -----
+
+    private static TableInfo findTable(List<TableInfo> tables, int row, int column) {
+        for (TableInfo table : tables) {
+            if (table.contains(row, column)) {
+                return table;
+            }
+        }
+
+        return null;
+    }
+
+    // The main color of a table style such as "TableStyleMedium2" (an approximation of Excel's).
+    private static int tableAccent(String style) {
+        int end = style.length();
+        int start = end;
+
+        while (start > 0 && Character.isDigit(style.charAt(start - 1))) {
+            start--;
+        }
+
+        int number = start < end ? Integer.parseInt(style.substring(start, end)) : 2;
+        int[] accents = {0x595959, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47};
+
+        return accents[((number - 1) % 7 + 7) % 7];
+    }
+
+    private static int lighten(int rgb, double amount) {
+        int red = (int) Math.round(((rgb >> 16) & 0xFF) + (255 - ((rgb >> 16) & 0xFF)) * amount);
+        int green = (int) Math.round(((rgb >> 8) & 0xFF) + (255 - ((rgb >> 8) & 0xFF)) * amount);
+        int blue = (int) Math.round((rgb & 0xFF) + (255 - (rgb & 0xFF)) * amount);
+
+        return (red << 16) | (green << 8) | blue;
+    }
+
+    // Moves up or down by whole rows, skipping the rows a filter hides.
+    private int stepRow(int row, int change) {
+        int target = Math.max(0, row + change);
+
+        if (change == 0 || baseRowHeight(target) != 0) {
+            return target;
+        }
+
+        int direction = change > 0 ? 1 : -1;
+
+        for (int guard = 0; target >= 0 && guard < 1_048_576 && baseRowHeight(target) == 0; guard++) {
+            target += direction;
+        }
+
+        return target < 0 ? row : target;
+    }
+
+    // Left edge of a visible column / top edge of a visible row, on screen.
+    private int columnLeft(int column) {
+        int x = GRID_X;
+
+        for (int c = firstVisibleColumn; c < column; c++) {
+            x += columnWidth(c);
+        }
+
+        return x;
+    }
+
+    private int rowTop(int row) {
+        int y = GRID_Y + headerHeight();
+
+        for (int r = firstVisibleRow; r < row; r++) {
+            y += rowHeight(r);
+        }
+
+        return y;
+    }
+
+    private static String describe(Throwable problem) {
+        return problem.getMessage() != null ? problem.getMessage() : problem.getClass().getSimpleName();
+    }
+
+    // Opens the filter list when the click is on a header cell's arrow.
+    private boolean openFilterMenuAt(double mouseX, double mouseY) {
+        if (!insideGrid(mouseX, mouseY)) {
+            return false;
+        }
+
+        int row = rowAt(mouseY);
+        int column = columnAt(mouseX);
+        TableInfo table = manager.tableAt(sheetIndex, row, column);
+
+        if (table == null || !table.filterButtons() || row != table.top()) {
+            return false;
+        }
+
+        int cellLeft = columnLeft(column);
+        int cellRight = cellLeft + columnWidth(column);
+        int top = rowTop(row);
+        int arrowWidth = Math.min(14, columnWidth(column) / 2);
+
+        if (mouseX < cellRight - arrowWidth - 2 || mouseX >= cellRight - 2
+                || mouseY < top + 2 || mouseY >= top + rowHeight(row) - 2) {
+            return false;
+        }
+
+        commitPendingEdit();
+        palette.close();
+        formatMenu.close();
+
+        int offset = column - table.left();
+
+        try {
+            TableInfo.FilterState state = manager.getFilterState(sheetIndex, table, offset);
+
+            if (state.custom()) {
+                status = "This column has a filter that can't be edited here. "
+                        + "Use the Filter button to remove it.";
+                return true;
+            }
+
+            filterMenu.open(
+                    cellRight - FilterMenu.WIDTH,
+                    top + rowHeight(row),
+                    this.width,
+                    this.height,
+                    table,
+                    offset,
+                    manager.getDistinctValues(sheetIndex, table, offset, 500),
+                    state.active() ? state.allowed() : null
+            );
+        } catch (RuntimeException | LinkageError exception) {
+            status = "Could not open the filter list: " + describe(exception);
+        }
+
+        return true;
+    }
+
+    // OK was pressed in the filter list: apply the ticked values.
+    private void applyFilterMenu() {
+        TableInfo table = filterMenu.table();
+
+        try {
+            manager.setColumnFilter(
+                    sheetIndex, table, filterMenu.columnOffset(), filterMenu.selected());
+            rowHeightCache.clear();
+            markDirty();
+
+            // If the selected cell was filtered away, go back to the header.
+            if (baseRowHeight(selectedRow) == 0) {
+                selectedRow = table.top();
+                collapseRange();
+                refreshEditor();
+            }
+
+            status = filterMenu.selected() == null ? "Filter cleared" : "Filter applied";
+        } catch (RuntimeException | LinkageError exception) {
+            status = "Could not apply the filter: " + describe(exception);
+        }
+    }
+
+    // The selected cells, or the block of data around the selected cell.
+    private int[] selectionOrRegion() {
+        if (hasMultiSelection()) {
+            return new int[] {rangeTop(), rangeLeft(), rangeBottom(), rangeRight()};
+        }
+
+        return manager.detectRegion(sheetIndex, selectedRow, selectedColumn);
+    }
+
+    // The Table button: makes a table from the selection, or turns the table you are in back into a range.
+    private void toggleTable() {
+        if (manager == null) {
+            return;
+        }
+
+        commitPendingEdit();
+        filterMenu.close();
+
+        try {
+            TableInfo existing = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
+
+            if (existing != null && existing.isTable()) {
+                manager.removeTable(sheetIndex, existing);
+                status = existing.name() + " is a normal range again";
+            } else {
+                int[] area = selectionOrRegion();
+                TableInfo created = manager.createTable(
+                        sheetIndex, area[0], area[1], area[2], area[3], "TableStyleMedium2");
+
+                status = "Created " + created.name();
+            }
+
+            rowHeightCache.clear();
+            markDirty();
+        } catch (IllegalArgumentException exception) {
+            status = exception.getMessage();
+        } catch (RuntimeException | LinkageError exception) {
+            status = "Could not change the table: " + describe(exception);
+        }
+    }
+
+    // The Filter button: shows or hides the filter arrows (for a table, or for a plain range).
+    private void toggleFilter() {
+        if (manager == null) {
+            return;
+        }
+
+        commitPendingEdit();
+        filterMenu.close();
+
+        try {
+            TableInfo existing = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
+
+            if (existing != null) {
+                manager.setFilterButtons(sheetIndex, existing, !existing.filterButtons());
+                status = existing.filterButtons() ? "Filter buttons hidden" : "Filter buttons shown";
+            } else {
+                int[] area = selectionOrRegion();
+
+                manager.addFilterRange(sheetIndex, area[0], area[1], area[2], area[3]);
+                status = "Filter buttons added";
+            }
+
+            rowHeightCache.clear();
+            markDirty();
+        } catch (IllegalArgumentException exception) {
+            status = exception.getMessage();
+        } catch (RuntimeException | LinkageError exception) {
+            status = "Could not change the filter: " + describe(exception);
+        }
+    }
+
+    // ----- remembering the view between visits -----
+
     // Brings back the zoom, sheet, selected cell and scroll position from last time.
     private void restoreViewState() {
         zoomPercent = Math.max(50, Math.min(300, ViewStateStore.loadZoom(zoomPercent)));
@@ -2668,8 +2985,8 @@ public class SpreadsheetScreen extends Screen {
     // Called whenever this screen is closed or replaced.
     @Override
     public void removed() {
-        restoreGuiScale();
         saveViewState();
+        restoreGuiScale();
         super.removed();
     }
 

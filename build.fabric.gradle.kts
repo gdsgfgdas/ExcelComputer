@@ -43,13 +43,15 @@ val bundledLibraries = listOf(
     "org.apache.poi:poi:5.2.5",
     "org.apache.xmlbeans:xmlbeans:5.2.0",
     "org.apache.commons:commons-collections4:4.4",
-    "org.apache.poi:poi-ooxml-lite:5.2.5",
+    "org.apache.poi:poi-ooxml-full:5.2.5", // all the Excel XML classes (the slim "lite" one has no filter classes)
     "org.apache.commons:commons-math3:3.6.1"
 ).map { notation ->
     (dependencies.create(notation) as ExternalModuleDependency).apply {
         exclude(group = "org.apache.logging.log4j")
         exclude(group = "commons-io")
         exclude(group = "commons-codec")
+        // poi-ooxml-full replaces the slim poi-ooxml-lite that POI would otherwise bring along.
+        exclude(group = "org.apache.poi", module = "poi-ooxml-lite")
     }
 }
 

@@ -12,10 +12,26 @@ import org.apache.poi.ss.usermodel.IndexedColors;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
 import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFFont;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFTable;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTAutoFilter;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTFilter;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTFilterColumn;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTFilters;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTTable;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTTableColumn;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTTableColumns;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTTableStyleInfo;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -26,14 +42,17 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 
 public class WorkbookManager implements AutoCloseable {
     // Plain decimal numbers only (so "1d", "NaN" or hex floats stay text).
@@ -45,7 +64,6 @@ public class WorkbookManager implements AutoCloseable {
     private final FormulaEvaluator evaluator;
     private final boolean csvMode;
     private final List<List<String>> csvRows = new ArrayList<>();
-
     // The formatting of each cell style in the workbook, looked up once per style.
     private final Map<Integer, CellFormat> formatCache = new HashMap<>();
     // Styles already created by a formatting change, so repeating one reuses the style.
@@ -93,7 +111,6 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
-    // Read CSV path finder
     private static List<List<String>> readCsv(Path path) throws IOException {
         List<List<String>> rows = new ArrayList<>();
 
@@ -176,6 +193,7 @@ public class WorkbookManager implements AutoCloseable {
 
         return workbook.getSheetName(index);
     }
+
     // ----- cell formatting (fill color, text color, bold, ...) -----
 
     /**
@@ -591,6 +609,553 @@ public class WorkbookManager implements AutoCloseable {
         return font;
     }
 
+    // ----- tables and filters -----
+
+    // Tables and filter ranges per sheet; cleared whenever one is added, removed or changed.
+    private final Map<Integer, List<TableInfo>> tableCache = new HashMap<>();
+
+    /**
+     * The tables on a sheet, then its plain filter range (if it has one).
+     */
+    public List<TableInfo> getTables(int sheetIndex) {
+        List<TableInfo> cached = tableCache.get(sheetIndex);
+
+        if (cached == null) {
+            try {
+                cached = buildTables(sheetIndex);
+            } catch (RuntimeException | LinkageError exception) {
+                cached = List.of();
+            }
+
+            tableCache.put(sheetIndex, cached);
+        }
+
+        return cached;
+    }
+
+    /**
+     * The table or filter range that contains this cell, or null.
+     */
+    public TableInfo tableAt(int sheetIndex, int rowIndex, int columnIndex) {
+        for (TableInfo table : getTables(sheetIndex)) {
+            if (table.contains(rowIndex, columnIndex)) {
+                return table;
+            }
+        }
+
+        return null;
+    }
+
+    private List<TableInfo> buildTables(int sheetIndex) {
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+        List<TableInfo> result = new ArrayList<>();
+
+        for (XSSFTable table : sheet.getTables()) {
+            CellReference start = table.getStartCellReference();
+            CellReference end = table.getEndCellReference();
+
+            if (start == null || end == null) {
+                continue;
+            }
+
+            CTTable ct = table.getCTTable();
+            CTAutoFilter autoFilter = ct.getAutoFilter();
+            CTTableStyleInfo styleInfo = ct.getTableStyleInfo();
+
+            result.add(new TableInfo(
+                    table.getName(),
+                    start.getRow(), start.getCol(), end.getRow(), end.getCol(),
+                    autoFilter != null,
+                    styleInfo == null || styleInfo.getName() == null ? "" : styleInfo.getName(),
+                    styleInfo == null || styleInfo.getShowRowStripes(),
+                    filteredColumns(autoFilter)
+            ));
+        }
+
+        CTAutoFilter sheetFilter = sheet.getCTWorksheet().getAutoFilter();
+
+        if (sheetFilter != null && sheetFilter.getRef() != null) {
+            CellRangeAddress range = CellRangeAddress.valueOf(sheetFilter.getRef());
+
+            result.add(new TableInfo(
+                    "",
+                    range.getFirstRow(), range.getFirstColumn(),
+                    range.getLastRow(), range.getLastColumn(),
+                    true, "", false, filteredColumns(sheetFilter)
+            ));
+        }
+
+        return result;
+    }
+
+    private static Set<Integer> filteredColumns(CTAutoFilter autoFilter) {
+        Set<Integer> columns = new HashSet<>();
+
+        if (autoFilter != null) {
+            for (CTFilterColumn column : autoFilter.getFilterColumnList()) {
+                columns.add((int) column.getColId());
+            }
+        }
+
+        return columns;
+    }
+
+    private CTAutoFilter autoFilterOf(int sheetIndex, TableInfo info) {
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+
+        if (info.isTable()) {
+            for (XSSFTable table : sheet.getTables()) {
+                if (info.name().equals(table.getName())) {
+                    return table.getCTTable().getAutoFilter();
+                }
+            }
+
+            return null;
+        }
+
+        return sheet.getCTWorksheet().getAutoFilter();
+    }
+
+    /**
+     * What the filter on one column of a table does right now.
+     */
+    public TableInfo.FilterState getFilterState(int sheetIndex, TableInfo info, int columnOffset) {
+        CTAutoFilter autoFilter = autoFilterOf(sheetIndex, info);
+
+        if (autoFilter == null) {
+            return TableInfo.FilterState.NONE;
+        }
+
+        for (CTFilterColumn column : autoFilter.getFilterColumnList()) {
+            if (column.getColId() != columnOffset) {
+                continue;
+            }
+
+            // Only plain "tick these values" filters can be edited here.
+            if (!column.isSetFilters() || column.getFilters().sizeOfDateGroupItemArray() > 0) {
+                return new TableInfo.FilterState(true, true, Set.of());
+            }
+
+            Set<String> allowed = new HashSet<>();
+
+            for (CTFilter filter : column.getFilters().getFilterList()) {
+                allowed.add(filter.getVal());
+            }
+
+            if (column.getFilters().getBlank()) {
+                allowed.add("");
+            }
+
+            return new TableInfo.FilterState(true, false, allowed);
+        }
+
+        return TableInfo.FilterState.NONE;
+    }
+
+    private static final Comparator<String> FILTER_VALUE_ORDER = (a, b) -> {
+        if (a.isEmpty() || b.isEmpty()) {
+            return a.isEmpty() ? (b.isEmpty() ? 0 : 1) : -1; // blanks last
+        }
+
+        boolean numberA = NUMBER.matcher(a.replace(",", "").replace("$", "").replace("%", "")).matches();
+        boolean numberB = NUMBER.matcher(b.replace(",", "").replace("$", "").replace("%", "")).matches();
+
+        if (numberA && numberB) {
+            return Double.compare(
+                    Double.parseDouble(a.replace(",", "").replace("$", "").replace("%", "")),
+                    Double.parseDouble(b.replace(",", "").replace("$", "").replace("%", "")));
+        }
+
+        if (numberA != numberB) {
+            return numberA ? -1 : 1; // numbers before text
+        }
+
+        return String.CASE_INSENSITIVE_ORDER.compare(a, b);
+    };
+
+    /**
+     * The different values in one column of a table (as shown in the cells), sorted.
+     */
+    public List<String> getDistinctValues(int sheetIndex, TableInfo info, int columnOffset, int limit) {
+        Set<String> seen = new LinkedHashSet<>();
+        int column = info.left() + columnOffset;
+
+        for (int row = info.top() + 1; row <= info.bottom() && seen.size() < limit; row++) {
+            seen.add(getCellText(sheetIndex, row, column));
+        }
+
+        List<String> values = new ArrayList<>(seen);
+        values.sort(FILTER_VALUE_ORDER);
+
+        return values;
+    }
+
+    /**
+     * Sets which values one column shows (null shows all of them) and hides the
+     * table rows that do not match any column's filter.
+     */
+    public void setColumnFilter(int sheetIndex, TableInfo info, int columnOffset, Set<String> allowed) {
+        CTAutoFilter autoFilter = autoFilterOf(sheetIndex, info);
+
+        if (autoFilter == null) {
+            throw new IllegalStateException("There are no filter buttons here");
+        }
+
+        int width = info.right() - info.left() + 1;
+
+        for (int column = 0; column < width; column++) {
+            if (column != columnOffset && getFilterState(sheetIndex, info, column).custom()) {
+                throw new IllegalStateException(
+                        "Another column has a filter that can't be edited here. Use the Filter button to clear it.");
+            }
+        }
+
+        for (int i = autoFilter.sizeOfFilterColumnArray() - 1; i >= 0; i--) {
+            if (autoFilter.getFilterColumnArray(i).getColId() == columnOffset) {
+                autoFilter.removeFilterColumn(i);
+            }
+        }
+
+        if (allowed != null) {
+            CTFilterColumn filterColumn = autoFilter.addNewFilterColumn();
+            filterColumn.setColId(columnOffset);
+
+            CTFilters filters = filterColumn.addNewFilters();
+
+            if (allowed.contains("")) {
+                filters.setBlank(true);
+            }
+
+            List<String> sorted = new ArrayList<>(allowed);
+            sorted.sort(FILTER_VALUE_ORDER);
+
+            for (String value : sorted) {
+                if (!value.isEmpty()) {
+                    filters.addNewFilter().setVal(value);
+                }
+            }
+        }
+
+        applyRowVisibility(sheetIndex, info);
+        tableCache.remove(sheetIndex);
+    }
+
+    // Hides the rows the filters leave out and shows the rest.
+    private void applyRowVisibility(int sheetIndex, TableInfo info) {
+        Map<Integer, Set<String>> criteria = new HashMap<>();
+
+        for (int column = 0; column <= info.right() - info.left(); column++) {
+            TableInfo.FilterState state = getFilterState(sheetIndex, info, column);
+
+            if (state.active() && !state.custom()) {
+                criteria.put(column, state.allowed());
+            }
+        }
+
+        Sheet sheet = workbook.getSheetAt(sheetIndex);
+
+        for (int rowIndex = info.top() + 1; rowIndex <= info.bottom(); rowIndex++) {
+            boolean visible = true;
+
+            for (Map.Entry<Integer, Set<String>> criterion : criteria.entrySet()) {
+                String text = getCellText(sheetIndex, rowIndex, info.left() + criterion.getKey());
+
+                if (!criterion.getValue().contains(text)) {
+                    visible = false;
+                    break;
+                }
+            }
+
+            Row row = sheet.getRow(rowIndex);
+
+            if (row == null) {
+                if (visible) {
+                    continue;
+                }
+
+                row = sheet.createRow(rowIndex);
+            }
+
+            row.setZeroHeight(!visible);
+        }
+    }
+
+    private void showAllRows(int sheetIndex, TableInfo info) {
+        Sheet sheet = workbook.getSheetAt(sheetIndex);
+
+        for (int rowIndex = info.top() + 1; rowIndex <= info.bottom(); rowIndex++) {
+            Row row = sheet.getRow(rowIndex);
+
+            if (row != null && row.getZeroHeight()) {
+                row.setZeroHeight(false);
+            }
+        }
+    }
+
+    /**
+     * Shows or hides a table's filter buttons (turning them off also clears its filters).
+     */
+    public void setFilterButtons(int sheetIndex, TableInfo info, boolean on) {
+        if (!info.isTable()) {
+            removeFilterRange(sheetIndex, info);
+            return;
+        }
+
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+
+        for (XSSFTable table : sheet.getTables()) {
+            if (!info.name().equals(table.getName())) {
+                continue;
+            }
+
+            CTTable ct = table.getCTTable();
+
+            if (on) {
+                if (ct.getAutoFilter() == null) {
+                    ct.addNewAutoFilter().setRef(
+                            new CellRangeAddress(info.top(), info.bottom(), info.left(), info.right())
+                                    .formatAsString());
+                }
+            } else if (ct.getAutoFilter() != null) {
+                ct.unsetAutoFilter();
+                showAllRows(sheetIndex, info);
+            }
+        }
+
+        tableCache.remove(sheetIndex);
+    }
+
+    /**
+     * Puts filter buttons on the top row of a range that is not a table.
+     */
+    public void addFilterRange(int sheetIndex, int top, int left, int bottom, int right) {
+        if (bottom == top && left == right) {
+            throw new IllegalArgumentException("Select the cells to filter first");
+        }
+
+        ((XSSFSheet) workbook.getSheetAt(sheetIndex))
+                .setAutoFilter(new CellRangeAddress(top, Math.max(top + 1, bottom), left, right));
+        tableCache.remove(sheetIndex);
+    }
+
+    public void removeFilterRange(int sheetIndex, TableInfo info) {
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+
+        if (sheet.getCTWorksheet().getAutoFilter() != null) {
+            sheet.getCTWorksheet().unsetAutoFilter();
+        }
+
+        showAllRows(sheetIndex, info);
+        tableCache.remove(sheetIndex);
+    }
+
+    // ----- making and removing tables -----
+
+    private boolean hasContent(Sheet sheet, int rowIndex, int columnIndex) {
+        if (rowIndex < 0 || columnIndex < 0) {
+            return false;
+        }
+
+        Row row = sheet.getRow(rowIndex);
+        Cell cell = row == null ? null : row.getCell(columnIndex);
+
+        return cell != null
+                && cell.getCellType() != CellType.BLANK
+                && !(cell.getCellType() == CellType.STRING && cell.getStringCellValue().isEmpty());
+    }
+
+    private boolean rowHasContent(Sheet sheet, int rowIndex, int fromColumn, int toColumn) {
+        for (int column = Math.max(0, fromColumn); column <= toColumn; column++) {
+            if (hasContent(sheet, rowIndex, column)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean columnHasContent(Sheet sheet, int columnIndex, int fromRow, int toRow) {
+        for (int row = Math.max(0, fromRow); row <= toRow; row++) {
+            if (hasContent(sheet, row, columnIndex)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The block of filled cells around a cell, like Excel finds when you make a table from one cell.
+     */
+    public int[] detectRegion(int sheetIndex, int rowIndex, int columnIndex) {
+        Sheet sheet = workbook.getSheetAt(sheetIndex);
+        int top = rowIndex;
+        int bottom = rowIndex;
+        int left = columnIndex;
+        int right = columnIndex;
+        boolean grew = true;
+
+        for (int pass = 0; grew && pass < 5000; pass++) {
+            grew = false;
+
+            if (top > 0 && rowHasContent(sheet, top - 1, left - 1, right + 1)) {
+                top--;
+                grew = true;
+            }
+
+            if (rowHasContent(sheet, bottom + 1, left - 1, right + 1)) {
+                bottom++;
+                grew = true;
+            }
+
+            if (left > 0 && columnHasContent(sheet, left - 1, top - 1, bottom + 1)) {
+                left--;
+                grew = true;
+            }
+
+            if (columnHasContent(sheet, right + 1, top - 1, bottom + 1)) {
+                right++;
+                grew = true;
+            }
+        }
+
+        return new int[]{top, left, bottom, right};
+    }
+
+    /**
+     * Turns a range into a table (its first row becomes the header).
+     */
+    public TableInfo createTable(
+            int sheetIndex, int top, int left, int bottom, int right, String styleName
+    ) {
+        if (!hasContent(workbook.getSheetAt(sheetIndex), top, left)
+                && top == bottom && left == right) {
+            throw new IllegalArgumentException("Select the cells for the table first");
+        }
+
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+        int lastRow = Math.max(bottom, top + 1); // a table needs a header and a data row
+
+        for (TableInfo existing : getTables(sheetIndex)) {
+            if (!existing.overlaps(top, left, lastRow, right)) {
+                continue;
+            }
+
+            if (existing.isTable()) {
+                throw new IllegalArgumentException("That overlaps the table " + existing.name());
+            }
+
+            // A plain filter range is replaced by the table's own filter buttons.
+            sheet.getCTWorksheet().unsetAutoFilter();
+        }
+
+        // Header names: the header cells' text; empty ones become Column1, Column2, ...
+        List<String> names = new ArrayList<>();
+        Set<String> used = new HashSet<>();
+
+        for (int column = left; column <= right; column++) {
+            String name = getCellText(sheetIndex, top, column).trim();
+
+            if (name.isEmpty()) {
+                name = "Column" + (column - left + 1);
+            }
+
+            String unique = name;
+
+            for (int copy = 2; !used.add(unique.toLowerCase(Locale.ROOT)); copy++) {
+                unique = name + copy;
+            }
+
+            names.add(unique);
+            getOrCreateCell(sheetIndex, top, column).setCellValue(unique);
+        }
+
+        // The table's name must be unique in the whole workbook.
+        Set<String> tableNames = new HashSet<>();
+
+        for (int index = 0; index < workbook.getNumberOfSheets(); index++) {
+            for (XSSFTable existing : ((XSSFSheet) workbook.getSheetAt(index)).getTables()) {
+                tableNames.add(existing.getName());
+            }
+        }
+
+        int number = 1;
+
+        while (tableNames.contains("Table" + number)) {
+            number++;
+        }
+
+        String name = "Table" + number;
+        String ref = new CellRangeAddress(top, lastRow, left, right).formatAsString();
+
+        XSSFTable table = sheet.createTable(null);
+        table.setName(name);
+        table.setDisplayName(name);
+
+        CTTable ct = table.getCTTable();
+        ct.setRef(ref);
+        ct.setTotalsRowShown(false);
+
+        CTTableStyleInfo styleInfo = ct.getTableStyleInfo();
+
+        if (styleInfo == null) {
+            styleInfo = ct.addNewTableStyleInfo();
+        }
+
+        styleInfo.setName(styleName);
+        styleInfo.setShowRowStripes(true);
+        styleInfo.setShowColumnStripes(false);
+        styleInfo.setShowFirstColumn(false);
+        styleInfo.setShowLastColumn(false);
+
+        CTTableColumns columns = ct.getTableColumns();
+
+        if (columns == null) {
+            columns = ct.addNewTableColumns();
+        }
+
+        while (columns.sizeOfTableColumnArray() > 0) {
+            columns.removeTableColumn(columns.sizeOfTableColumnArray() - 1);
+        }
+
+        for (int i = 0; i < names.size(); i++) {
+            CTTableColumn column = columns.addNewTableColumn();
+            column.setId(i + 1);
+            column.setName(names.get(i));
+        }
+
+        columns.setCount(names.size());
+
+        CTAutoFilter autoFilter = ct.getAutoFilter();
+
+        if (autoFilter == null) {
+            autoFilter = ct.addNewAutoFilter();
+        }
+
+        autoFilter.setRef(ref);
+
+        tableCache.remove(sheetIndex);
+
+        return tableAt(sheetIndex, top, left);
+    }
+
+    /**
+     * Turns a table back into an ordinary range (cells and their values stay).
+     */
+    public void removeTable(int sheetIndex, TableInfo info) {
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+
+        for (XSSFTable table : new ArrayList<>(sheet.getTables())) {
+            if (info.name().equals(table.getName())) {
+                sheet.removeTable(table);
+                break;
+            }
+        }
+
+        showAllRows(sheetIndex, info);
+        tableCache.remove(sheetIndex);
+    }
+
     // ----- column widths and row heights -----
     // Excel stores sizes in its own units. These convert them to and from pixels
     // (7 pixels per character of width, 4/3 pixel per point of height), the same
@@ -619,6 +1184,12 @@ public class WorkbookManager implements AutoCloseable {
         try {
             Sheet sheet = workbook.getSheetAt(sheetIndex);
             Row row = sheet.getRow(rowIndex);
+
+            // A row hidden by a filter takes no room on screen.
+            if (row != null && row.getZeroHeight()) {
+                return 0;
+            }
+
             float points = row != null
                     ? row.getHeightInPoints()
                     : sheet.getDefaultRowHeightInPoints();
@@ -753,20 +1324,6 @@ public class WorkbookManager implements AutoCloseable {
     /**
      * Returns {previousStyle, newStyle} if typing also set a number format (like "$5"), else null.
      */
-    public int[] setCellValue(
-            int sheetIndex,
-            int rowIndex,
-            int columnIndex,
-            String value
-    ) {
-        int[] styles = setCellValueDeferred(sheetIndex, rowIndex, columnIndex, value);
-        recalculate();
-        return styles;
-    }
-
-    /**
-     * Writes a cell without recalculating. Call recalculate() afterwards.
-     */
     public int[] setCellValueDeferred(
             int sheetIndex,
             int rowIndex,
@@ -827,62 +1384,7 @@ public class WorkbookManager implements AutoCloseable {
 
         cell.setCellStyle(workbook.getCellStyleAt(target));
 
-        return new int[]{current, target};
-    }
-
-    private void saveCsv(Path path) throws IOException {
-        Path temp = path.resolveSibling(path.getFileName() + ".tmp");
-
-        try (var writer = Files.newBufferedWriter(
-                temp,
-                StandardCharsets.UTF_8
-        )) {
-            for (int r = 0; r < csvRows.size(); r++) {
-                List<String> row = csvRows.get(r);
-
-                for (int c = 0; c < row.size(); c++) {
-                    if (c > 0) {
-                        writer.write(',');
-                    }
-
-                    String value = row.get(c);
-
-                    boolean quote = value.contains(",")
-                            || value.contains("\"")
-                            || value.contains("\n")
-                            || value.contains("\r");
-
-                    if (quote) {
-                        writer.write('"');
-                        writer.write(value.replace("\"", "\"\""));
-                        writer.write('"');
-                    } else {
-                        writer.write(value);
-                    }
-                }
-
-                if (r < csvRows.size() - 1) {
-                    writer.write("\r\n");
-                }
-            }
-        } catch (IOException | RuntimeException exception) {
-            Files.deleteIfExists(temp);
-            throw exception;
-        }
-
-        try {
-            Files.move(
-                    temp,
-                    path,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE
-            );
-        } catch (AtomicMoveNotSupportedException exception) {
-            Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException exception) {
-            Files.deleteIfExists(temp);
-            throw exception;
-        }
+        return new int[] {current, target};
     }
 
     /**
@@ -1109,6 +1611,61 @@ public class WorkbookManager implements AutoCloseable {
             );
         } catch (AtomicMoveNotSupportedException exception) {
             Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private void saveCsv(Path path) throws IOException {
+        Path temp = path.resolveSibling(path.getFileName() + ".tmp");
+
+        try (var writer = Files.newBufferedWriter(
+                temp,
+                StandardCharsets.UTF_8
+        )) {
+            for (int r = 0; r < csvRows.size(); r++) {
+                List<String> row = csvRows.get(r);
+
+                for (int c = 0; c < row.size(); c++) {
+                    if (c > 0) {
+                        writer.write(',');
+                    }
+
+                    String value = row.get(c);
+
+                    boolean quote = value.contains(",")
+                            || value.contains("\"")
+                            || value.contains("\n")
+                            || value.contains("\r");
+
+                    if (quote) {
+                        writer.write('"');
+                        writer.write(value.replace("\"", "\"\""));
+                        writer.write('"');
+                    } else {
+                        writer.write(value);
+                    }
+                }
+
+                if (r < csvRows.size() - 1) {
+                    writer.write("\r\n");
+                }
+            }
+        } catch (IOException | RuntimeException exception) {
+            Files.deleteIfExists(temp);
+            throw exception;
+        }
+
+        try {
+            Files.move(
+                    temp,
+                    path,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE
+            );
+        } catch (AtomicMoveNotSupportedException exception) {
+            Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException exception) {
+            Files.deleteIfExists(temp);
+            throw exception;
         }
     }
 
