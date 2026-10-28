@@ -159,7 +159,10 @@ public final class ColorPalette {
         graphics.drawString(
                 font,
                 target == Target.FILL ? "No fill" : "Automatic",
-                x + PAD + 4, y + PAD + 4, 0xFFFFFFFF, false
+                x + PAD + 4,
+                y + PAD + 4,
+                0xFFFFFFFF,
+                false
         );
 
         for (int column = 0; column < COLUMNS; column++) {

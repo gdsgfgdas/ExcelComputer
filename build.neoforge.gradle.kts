@@ -1,5 +1,5 @@
 plugins {
-    id("net.neoforged.moddev") version "2.0.147"
+    id("net.neoforged.moddev") version "2.0.148"
     id("neoforge-mutex")
     // Bundles the libraries into the mod jar and renames some of their packages
     id("com.gradleup.shadow") version "9.3.1"

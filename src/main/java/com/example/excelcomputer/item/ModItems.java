@@ -30,10 +30,14 @@ public class ModItems {
 
     //? if fabric {
     public static void initialize() {
-        Registry.register(BuiltInRegistries.ITEM, EXCEL_ON_A_STICK_KEY, EXCEL_ON_A_STICK);
+        Registry.register(
+                BuiltInRegistries.ITEM,
+                EXCEL_ON_A_STICK_KEY,
+                EXCEL_ON_A_STICK
+        );
 
         ItemGroupEvents.modifyEntriesEvent(CreativeModeTabs.TOOLS_AND_UTILITIES)
                 .register(entries -> entries.accept(EXCEL_ON_A_STICK));
     }
-    //?}
+//?}
 }

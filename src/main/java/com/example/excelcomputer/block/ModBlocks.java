@@ -58,5 +58,5 @@ public class ModBlocks {
         ItemGroupEvents.modifyEntriesEvent(CreativeModeTabs.FUNCTIONAL_BLOCKS)
                 .register(entries -> entries.accept(EXCEL_COMPUTER_ITEM));
     }
-    //?}
+//?}
 }

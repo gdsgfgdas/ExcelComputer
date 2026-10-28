@@ -42,12 +42,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.DateTimeException;
 import java.time.LocalDate;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -112,9 +110,26 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     private static List<List<String>> readCsv(Path path) throws IOException {
+        try {
+            return readCsv(path, StandardCharsets.UTF_8);
+        } catch (java.nio.charset.MalformedInputException exception) {
+            // Not UTF-8: Excel's plain "CSV (Comma delimited)" is Windows-1252.
+            return readCsv(path, java.nio.charset.Charset.forName("windows-1252"));
+        }
+    }
+
+    private static List<List<String>> readCsv(Path path, java.nio.charset.Charset charset)
+            throws IOException {
         List<List<String>> rows = new ArrayList<>();
 
-        try (var reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+        try (var reader = Files.newBufferedReader(path, charset)) {
+            // Skip the byte order mark that Excel's "CSV UTF-8" files start with.
+            reader.mark(1);
+
+            if (reader.read() != '\uFEFF') {
+                reader.reset();
+            }
+
             StringBuilder field = new StringBuilder();
             List<String> row = new ArrayList<>();
             boolean insideQuotes = false;
@@ -230,7 +245,10 @@ public class WorkbookManager implements AutoCloseable {
             int columnIndex,
             CellFormat.Change change
     ) {
-        if (csvMode) return null;
+        if (csvMode) {
+            throw new IllegalStateException("CSV files can't hold formatting (use an .xlsx file)");
+        }
+
         Cell existing = findCell(sheetIndex, rowIndex, columnIndex);
         int previous = existing == null ? 0 : existing.getCellStyle().getIndex();
         CellFormat.Change effective = change.kind() == CellFormat.Kind.DECIMALS
@@ -617,7 +635,17 @@ public class WorkbookManager implements AutoCloseable {
     /**
      * The tables on a sheet, then its plain filter range (if it has one).
      */
+    private void requireWorkbookFile() {
+        if (csvMode) {
+            throw new IllegalArgumentException("Tables and filters need an .xlsx file, not a .csv");
+        }
+    }
+
     public List<TableInfo> getTables(int sheetIndex) {
+        if (csvMode) {
+            return List.of();
+        }
+
         List<TableInfo> cached = tableCache.get(sheetIndex);
 
         if (cached == null) {
@@ -929,6 +957,8 @@ public class WorkbookManager implements AutoCloseable {
      * Puts filter buttons on the top row of a range that is not a table.
      */
     public void addFilterRange(int sheetIndex, int top, int left, int bottom, int right) {
+        requireWorkbookFile();
+
         if (bottom == top && left == right) {
             throw new IllegalArgumentException("Select the cells to filter first");
         }
@@ -988,6 +1018,8 @@ public class WorkbookManager implements AutoCloseable {
      * The block of filled cells around a cell, like Excel finds when you make a table from one cell.
      */
     public int[] detectRegion(int sheetIndex, int rowIndex, int columnIndex) {
+        requireWorkbookFile();
+
         Sheet sheet = workbook.getSheetAt(sheetIndex);
         int top = rowIndex;
         int bottom = rowIndex;
@@ -1028,6 +1060,8 @@ public class WorkbookManager implements AutoCloseable {
     public TableInfo createTable(
             int sheetIndex, int top, int left, int bottom, int right, String styleName
     ) {
+        requireWorkbookFile();
+
         if (!hasContent(workbook.getSheetAt(sheetIndex), top, left)
                 && top == bottom && left == right) {
             throw new IllegalArgumentException("Select the cells for the table first");
@@ -1322,7 +1356,24 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     /**
-     * Returns {previousStyle, newStyle} if typing also set a number format (like "$5"), else null.
+     * Writes a cell and recalculates the formulas. Returns {previousStyle, newStyle} if typing
+     * also set a number format (like "$5"), else null.
+     */
+    public int[] setCellValue(
+            int sheetIndex,
+            int rowIndex,
+            int columnIndex,
+            String value
+    ) {
+        int[] styles = setCellValueDeferred(sheetIndex, rowIndex, columnIndex, value);
+        recalculate();
+        return styles;
+    }
+
+    /**
+     * Writes a cell without recalculating (call recalculate() once afterwards when writing
+     * many cells). Returns {previousStyle, newStyle} if typing also set a number format
+     * (like "$5"), else null.
      */
     public int[] setCellValueDeferred(
             int sheetIndex,
@@ -1391,6 +1442,10 @@ public class WorkbookManager implements AutoCloseable {
      * Recalculates all formulas when possible.
      */
     public void recalculate() {
+        if (csvMode) {
+            return;
+        }
+
         try {
             evaluator.clearAllCachedResultValues();
             evaluator.evaluateAll();

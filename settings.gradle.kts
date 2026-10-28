@@ -38,8 +38,15 @@ stonecutter {
         }
 
         // Fabric and NeoForge, on 1.21.1 and 1.21.10.
+// Existing Minecraft versions
         match("1.21.1", "fabric", "neoforge")
         match("1.21.10", "fabric", "neoforge")
+
+// Minecraft 26.1.2
+        match("26.1.2", "fabric", "neoforge")
+
+        match("26.2", "fabric", "neoforge")
+
         vcsVersion = "1.21.10-fabric"
     }
 }
