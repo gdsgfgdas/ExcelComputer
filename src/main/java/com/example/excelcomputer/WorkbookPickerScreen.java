@@ -89,7 +89,11 @@ public class WorkbookPickerScreen extends Screen {
 
     // Shows the title and the status line (the picker never displayed its status text before).
     @Override
+    //? if >=26.1 {
+    /*public void extractRenderState(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    *///?} else {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    //?}
         super.render(graphics, mouseX, mouseY, partialTick);
 
         graphics.drawCenteredString(this.font, this.title, this.width / 2, 20, 0xFFFFFFFF);

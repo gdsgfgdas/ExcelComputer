@@ -15,6 +15,10 @@ public class ExcelComputer {
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
 	public static ResourceLocation id(String path) {
+		//? if >=1.21 {
 		return ResourceLocation.fromNamespaceAndPath(MOD_ID, path);
+		//?} else {
+		/*return new ResourceLocation(MOD_ID, path);
+		*///?}
 	}
 }

@@ -32,6 +32,11 @@ repositories {
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
 }
 
+// Minecraft 1.20.1 ships older libraries (for example commons-io 2.11), so it needs the
+// matching older POI. Newer versions use POI 5.2.5.
+val poiVersion = if (sc.current.parsed < "1.21") "5.2.3" else "5.2.5"
+val xmlBeansVersion = if (sc.current.parsed < "1.21") "5.1.1" else "5.2.0"
+
 // Libraries bundled inside the mod jar. Minecraft already ships log4j, commons-io
 // and commons-codec, and the game uses ITS copies at runtime (a newer copy
 // nested in a mod does not replace them), so they are left out here. POI 5.2.5
@@ -39,11 +44,11 @@ repositories {
 // Minecraft 1.21.1 ships; 5.4.1 needs a newer commons-io and crashes with
 // NoSuchMethodError outside the development environment.
 val bundledLibraries = listOf(
-    "org.apache.poi:poi-ooxml:5.2.5",
-    "org.apache.poi:poi:5.2.5",
-    "org.apache.xmlbeans:xmlbeans:5.2.0",
+    "org.apache.poi:poi-ooxml:$poiVersion",
+    "org.apache.poi:poi:$poiVersion",
+    "org.apache.xmlbeans:xmlbeans:$xmlBeansVersion",
     "org.apache.commons:commons-collections4:4.4",
-    "org.apache.poi:poi-ooxml-full:5.2.5", // all the Excel XML classes (the slim "lite" one has no filter classes)
+    "org.apache.poi:poi-ooxml-full:$poiVersion", // all the Excel XML classes (the slim "lite" one has no filter classes)
     "org.apache.commons:commons-math3:3.6.1"
 ).map { notation ->
     (dependencies.create(notation) as ExternalModuleDependency).apply {
@@ -118,6 +123,7 @@ tasks {
             register("version", sc.properties["mod.version"])
             register("minecraft", sc.properties["mod.mc_compat"])
             register("loader", Regex("\\d+\\.\\d+").find(sc.properties.get<String>("deps.fabric_loader"))!!.value)
+            register("java", requiredJava.majorVersion)
         }
 
         filesMatching("fabric.mod.json") { expand(props) }
@@ -138,7 +144,20 @@ tasks {
             }
         }
 
-        exclude("META-INF/neoforge.mods.toml")
+        // 1.20.1 and older: the data folders are plural and a recipe result names its "item".
+        if (sc.current.parsed < "1.21") {
+            filesMatching("data/*/recipe/*.json") {
+                filter { line ->
+                    line.replace(Regex("\"id\"(\\s*:\\s*)\"([^\"]+)\""), "\"item\"\$1\"\$2\"")
+                }
+                path = path.replace("/recipe/", "/recipes/")
+            }
+            filesMatching("data/*/loot_table/**/*.json") {
+                path = path.replace("/loot_table/", "/loot_tables/")
+            }
+        }
+
+        exclude("META-INF/neoforge.mods.toml", "META-INF/mods.toml", "pack.mcmeta")
     }
 
     // Includes the license file in the built mod

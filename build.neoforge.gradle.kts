@@ -138,7 +138,7 @@ tasks {
             }
         }
 
-        exclude("fabric.mod.json", "*.ct", "*.classtweaker")
+        exclude("fabric.mod.json", "META-INF/mods.toml", "pack.mcmeta", "*.ct", "*.classtweaker")
     }
 
     named("createMinecraftArtifacts") {

@@ -1,11 +1,4 @@
-
 package com.example.excelcomputer;
-
-//? if fabric {
-import net.fabricmc.loader.api.FabricLoader;
-//?} else {
-/*import net.neoforged.fml.loading.FMLPaths;
- *///?}
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -18,10 +11,12 @@ import java.util.stream.Stream;
 public final class WorkbookFiles {
     private static final Path WORKBOOK_DIRECTORY =
             //? if fabric {
-            FabricLoader.getInstance().getGameDir()
-                    //?} else {
-                    /*FMLPaths.GAMEDIR.get()
-                     *///?}
+            net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir()
+            //?} elif neoforge {
+            /*net.neoforged.fml.loading.FMLPaths.GAMEDIR.get()
+            *///?} else {
+            /*net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get()
+            *///?}
                     .resolve("excelcomputer")
                     .resolve("workbooks");
 

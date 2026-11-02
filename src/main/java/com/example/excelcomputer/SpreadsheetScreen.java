@@ -516,15 +516,25 @@ public class SpreadsheetScreen extends Screen {
     // Before 1.21.6, Screen.render() draws the blurred menu background itself,
     // after our own drawing, which blurs the whole spreadsheet. This turns that
     // off. (Newer versions draw it earlier, so our drawing covers it.)
-    //? if <1.21.6 {
+    //? if >=1.21.6 {
+    //?} elif >=1.20.2 {
     /*@Override
     public void renderBackground(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    }
+
+    *///?} else {
+    /*@Override
+    public void renderBackground(GuiGraphics graphics) {
     }
 
     *///?}
 
     @Override
+    //? if >=26.1 {
+    /*public void extractRenderState(
+    *///?} else {
     public void render(
+    //?}
             GuiGraphics graphics,
             int mouseX,
             int mouseY,
@@ -836,6 +846,7 @@ public class SpreadsheetScreen extends Screen {
         renderRibbonOverlay(graphics, mouseX, mouseY);
     }
 
+    //? if >=1.20.2 {
     @Override
     public boolean mouseScrolled(
             double mouseX,
@@ -843,8 +854,32 @@ public class SpreadsheetScreen extends Screen {
             double scrollX,
             double scrollY
     ) {
+        if (handleMouseScrolled(mouseX, mouseY, scrollX, scrollY)) {
+            return true;
+        }
+
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+    }
+    //?} else {
+    /*@Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (handleMouseScrolled(mouseX, mouseY, 0, delta)) {
+            return true;
+        }
+
+        return super.mouseScrolled(mouseX, mouseY, delta);
+    }
+    *///?}
+
+    // Shared by every Minecraft version. Returns true when the wheel was used.
+    private boolean handleMouseScrolled(
+            double mouseX,
+            double mouseY,
+            double scrollX,
+            double scrollY
+    ) {
         if (manager == null) {
-            return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
+            return false;
         }
 
         if (filterMenu.isOpen()) {
@@ -1908,7 +1943,12 @@ public class SpreadsheetScreen extends Screen {
         pointStart = start;
         pointEnd = start + reference.length();
 
+        //? if >=1.21 {
         cellEditor.moveCursorTo(pointEnd, false);
+        //?} else {
+        /*cellEditor.setCursorPosition(pointEnd);
+        cellEditor.setHighlightPos(pointEnd);
+        *///?}
     }
 
     //? if >=1.21.9 {
@@ -2264,7 +2304,7 @@ public class SpreadsheetScreen extends Screen {
         );
 
         try {
-            int[] styles = manager.setCellValueDeferred(
+            int[] styles = manager.setCellValue(
                     sheetIndex,
                     selectedRow,
                     selectedColumn,
@@ -2693,6 +2733,22 @@ public class SpreadsheetScreen extends Screen {
     }
 
     // Resizing the window resets the GUI size, so put ours back.
+    //? if >=26.1 {
+    /*@Override
+    public void resize(int width, int height) {
+        if (!guiScaleOverridden) {
+            super.resize(width, height);
+            return;
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.getWindow().setGuiScale(fixedGuiScale(minecraft));
+        super.resize(
+                minecraft.getWindow().getGuiScaledWidth(),
+                minecraft.getWindow().getGuiScaledHeight()
+        );
+    }
+    *///?} else {
     @Override
     public void resize(Minecraft minecraft, int width, int height) {
         if (!guiScaleOverridden) {
@@ -2707,6 +2763,7 @@ public class SpreadsheetScreen extends Screen {
                 minecraft.getWindow().getGuiScaledHeight()
         );
     }
+    //?}
 
     // ----- tables and filters -----
 

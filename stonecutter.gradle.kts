@@ -15,7 +15,7 @@ stonecutter parameters {
 
     // Adds constants to Stonecutter comments (i.e. for `//? if fabric {...`)
     constants {
-        match(loader, "fabric", "neoforge")
+        match(loader, "fabric", "neoforge", "forge")
     }
 
     swaps["mod_version"] = "\"${properties.get<String>("mod.version")}\";"
@@ -31,6 +31,16 @@ stonecutter parameters {
         string(current.parsed >= "26.1") {
             replace("classTweaker v2 named", "classTweaker v2 official")
             replace("GuiGraphics", "GuiGraphicsExtractor")
+            // 26.1 renamed the text drawing methods and Screen.render.
+            // These also run in reverse on older versions, so keep the patterns
+            // specific ("graphics." prefix), or unrelated calls like change.text() break.
+            replace("graphics.drawString(", "graphics.text(")
+            replace("graphics.drawCenteredString(", "graphics.centeredText(")
+            replace("super.render(", "super.extractRenderState(")
+            replace("import net.minecraft.Util;", "import net.minecraft.util.Util;")
+            // Fabric API replaced the item group API with the creative tab API
+            replace("net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents", "net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents")
+            replace("ItemGroupEvents.modifyEntriesEvent(", "CreativeModeTabEvents.modifyOutputEvent(")
         }
     }
 }
