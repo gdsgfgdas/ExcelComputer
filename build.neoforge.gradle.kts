@@ -163,9 +163,15 @@ tasks {
 
         // Give our private copies of these libraries their own package names so
         // they cannot clash with the same libraries bundled by other mods.
-        relocate("org.apache.commons.collections4", "com.example.excelcomputer.libs.collections4")
-        relocate("org.apache.commons.math3", "com.example.excelcomputer.libs.math3")
-        relocate("org.apache.commons.compress", "com.example.excelcomputer.libs.compress")
+        relocate("org.apache.commons.collections4", "io.github.reverendbrown.excelcomputer.libs.collections4")
+        relocate("org.apache.commons.math3", "io.github.reverendbrown.excelcomputer.libs.math3")
+        relocate("org.apache.commons.compress", "io.github.reverendbrown.excelcomputer.libs.compress")
+        // Small helper libraries POI uses (bit sets, chart curves); nothing looks
+        // them up by name, so they can be renamed safely too. POI itself and
+        // xmlbeans cannot: xmlbeans finds the Excel schema classes by names
+        // stored inside its binary .xsb files.
+        relocate("com.zaxxer.sparsebits", "io.github.reverendbrown.excelcomputer.libs.sparsebits")
+        relocate("com.graphbuilder", "io.github.reverendbrown.excelcomputer.libs.graphbuilder")
 
         mergeServiceFiles()
 

@@ -11,10 +11,10 @@
   "environment": "*",
   "entrypoints": {
     "main": [
-      "com.example.excelcomputer.ExcelComputerFabric"
+      "io.github.reverendbrown.excelcomputer.ExcelComputerFabric"
     ],
     "client": [
-      "com.example.excelcomputer.ExcelComputerFabricClient"
+      "io.github.reverendbrown.excelcomputer.ExcelComputerFabricClient"
     ]
   },
   "depends": {

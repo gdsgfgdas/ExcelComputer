@@ -42,5 +42,11 @@ stonecutter parameters {
             replace("net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents", "net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents")
             replace("ItemGroupEvents.modifyEntriesEvent(", "CreativeModeTabEvents.modifyOutputEvent(")
         }
+
+        string(current.parsed >= "26.2") {
+            // 26.2 moved Minecraft.setScreen to Minecraft.gui.setScreen.
+            replace("minecraft.setScreen(", "minecraft.gui.setScreen(")
+            replace("Minecraft.getInstance().setScreen(", "Minecraft.getInstance().gui.setScreen(")
+        }
     }
 }
