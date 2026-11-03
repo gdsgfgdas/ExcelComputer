@@ -1,0 +1,15 @@
+package io.github.reverendbrown.excelcomputer;
+
+/**
+ * Lets code that runs on both client and server (the block and the item) open
+ * the spreadsheet screen without mentioning any client-only class. The client
+ * entry point fills the hook in; a dedicated server never does, and never
+ * needs to.
+ */
+public final class ClientHooks {
+    public static Runnable openWorkbookPicker = () -> {
+    };
+
+    private ClientHooks() {
+    }
+}
