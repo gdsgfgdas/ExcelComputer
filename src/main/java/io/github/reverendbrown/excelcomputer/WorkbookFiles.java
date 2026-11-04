@@ -28,6 +28,28 @@ public final class WorkbookFiles {
         return WORKBOOK_DIRECTORY;
     }
 
+    // Where shared workbooks are downloaded to (one folder per workbook).
+    public static Path getSharedCacheDirectory() throws IOException {
+        Path directory = WORKBOOK_DIRECTORY.resolveSibling("shared-cache");
+        Files.createDirectories(directory);
+        return directory;
+    }
+
+    // A file name in the workbooks folder that isn't taken yet, like "Budget (2).xlsx".
+    public static Path freeWorkbookPath(String fileName) throws IOException {
+        Path directory = getDirectory();
+        int dot = fileName.lastIndexOf('.');
+        String stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+        String extension = dot > 0 ? fileName.substring(dot) : "";
+        Path candidate = directory.resolve(fileName);
+
+        for (int number = 2; Files.exists(candidate); number++) {
+            candidate = directory.resolve(stem + " (" + number + ")" + extension);
+        }
+
+        return candidate;
+    }
+
     public static List<Path> listWorkbooks() throws IOException {
         Path directory = getDirectory();
 

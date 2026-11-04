@@ -268,6 +268,16 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     /**
+     * The style index of a cell (0 = the default style), or -1 in CSV mode,
+     * which has no formatting. Used to copy formatting with copy and paste.
+     */
+    public int getCellStyleIndex(int sheetIndex, int rowIndex, int columnIndex) {
+        if (csvMode) return -1;
+        Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
+        return cell == null ? 0 : cell.getCellStyle().getIndex();
+    }
+
+    /**
      * Puts a cell back to a style index (used by undo and redo).
      */
     public void setCellStyleIndex(int sheetIndex, int rowIndex, int columnIndex, int styleIndex) {
@@ -1324,6 +1334,156 @@ public class WorkbookManager implements AutoCloseable {
         tableCache.remove(sheetIndex);
     }
 
+    // ----- undoing table and filter changes -----
+
+    /**
+     * A copy of a sheet's tables and filter range, plus the cells a table
+     * change can touch inside an area: the header row's values (making a
+     * table renames empty headers) and which rows are hidden by filters.
+     * Undo puts back the state from before a change, redo the one after it.
+     */
+    public static final class TableState {
+        private final List<CTTable> tables;
+        private final CTAutoFilter sheetFilter;
+        private final int top;
+        private final int left;
+        private final int bottom;
+        private final int right;
+        private final List<String> headerInputs;
+        private final boolean[] hiddenRows;
+
+        private TableState(List<CTTable> tables, CTAutoFilter sheetFilter, int top, int left,
+                           int bottom, int right, List<String> headerInputs, boolean[] hiddenRows) {
+            this.tables = tables;
+            this.sheetFilter = sheetFilter;
+            this.top = top;
+            this.left = left;
+            this.bottom = bottom;
+            this.right = right;
+            this.headerInputs = headerInputs;
+            this.hiddenRows = hiddenRows;
+        }
+    }
+
+    /**
+     * Copies the sheet's tables and filter range, and the header values and
+     * hidden rows in the area a table or filter change works on. Returns
+     * null for a CSV file (it has no tables).
+     */
+    public TableState captureTableState(int sheetIndex, int top, int left, int bottom, int right) {
+        if (csvMode) {
+            return null;
+        }
+
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+        List<CTTable> tables = new ArrayList<>();
+
+        for (XSSFTable table : sheet.getTables()) {
+            tables.add((CTTable) table.getCTTable().copy());
+        }
+
+        CTAutoFilter sheetFilter = sheet.getCTWorksheet().getAutoFilter() == null
+                ? null
+                : (CTAutoFilter) sheet.getCTWorksheet().getAutoFilter().copy();
+
+        List<String> headerInputs = new ArrayList<>();
+
+        for (int column = left; column <= right; column++) {
+            headerInputs.add(getCellInput(sheetIndex, top, column));
+        }
+
+        boolean[] hiddenRows = new boolean[bottom - top + 1];
+
+        for (int row = top; row <= bottom; row++) {
+            Row sheetRow = sheet.getRow(row);
+            hiddenRows[row - top] = sheetRow != null && sheetRow.getZeroHeight();
+        }
+
+        return new TableState(tables, sheetFilter, top, left, bottom, right, headerInputs, hiddenRows);
+    }
+
+    /**
+     * Puts a sheet's tables and filter range back as they were when the state
+     * was captured. Call recalculate() afterwards (header values may change).
+     */
+    public void restoreTableState(int sheetIndex, TableState state) {
+        XSSFSheet sheet = (XSSFSheet) workbook.getSheetAt(sheetIndex);
+
+        for (XSSFTable table : new ArrayList<>(sheet.getTables())) {
+            sheet.removeTable(table);
+        }
+
+        // Table names must be unique in the whole workbook; another sheet may
+        // have taken one since.
+        Set<String> otherNames = new HashSet<>();
+
+        for (int index = 0; index < workbook.getNumberOfSheets(); index++) {
+            if (index != sheetIndex) {
+                for (XSSFTable other : ((XSSFSheet) workbook.getSheetAt(index)).getTables()) {
+                    otherNames.add(other.getName().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+
+        for (CTTable saved : state.tables) {
+            XSSFTable table = sheet.createTable(null);
+            // Keep the id the new table part was given; copy everything else.
+            long id = table.getCTTable().getId();
+            table.getCTTable().set(saved);
+            table.getCTTable().setId(id);
+
+            String name = table.getCTTable().getName();
+
+            if (name == null || otherNames.contains(name.toLowerCase(Locale.ROOT))) {
+                int number = 1;
+
+                while (otherNames.contains(("table" + number).toLowerCase(Locale.ROOT))) {
+                    number++;
+                }
+
+                name = "Table" + number;
+                table.getCTTable().setName(name);
+                table.getCTTable().setDisplayName(name);
+            }
+
+            otherNames.add(name.toLowerCase(Locale.ROOT));
+            table.updateReferences();
+        }
+
+        if (sheet.getCTWorksheet().getAutoFilter() != null) {
+            sheet.getCTWorksheet().unsetAutoFilter();
+        }
+
+        if (state.sheetFilter != null && state.sheetFilter.getRef() != null) {
+            // setAutoFilter also writes the hidden name Excel keeps for the filter range.
+            sheet.setAutoFilter(CellRangeAddress.valueOf(state.sheetFilter.getRef()));
+            sheet.getCTWorksheet().getAutoFilter().set(state.sheetFilter);
+        }
+
+        for (int column = state.left; column <= state.right; column++) {
+            String input = state.headerInputs.get(column - state.left);
+
+            if (!input.equals(getCellInput(sheetIndex, state.top, column))) {
+                setCellValueDeferred(sheetIndex, state.top, column, input);
+            }
+        }
+
+        for (int row = state.top; row <= state.bottom; row++) {
+            boolean hidden = state.hiddenRows[row - state.top];
+            Row sheetRow = sheet.getRow(row);
+
+            if (sheetRow == null && hidden) {
+                sheetRow = sheet.createRow(row);
+            }
+
+            if (sheetRow != null && sheetRow.getZeroHeight() != hidden) {
+                sheetRow.setZeroHeight(hidden);
+            }
+        }
+
+        tableCache.remove(sheetIndex);
+    }
+
     // ----- column widths and row heights -----
     // Excel stores sizes in its own units. These convert them to and from pixels
     // (7 pixels per character of width, 4/3 pixel per point of height), the same
@@ -1440,6 +1600,51 @@ public class WorkbookManager implements AutoCloseable {
                     return cell.getStringCellValue();
                 case BLANK:
                     return "";
+                default:
+                    return getCellText(sheetIndex, rowIndex, columnIndex);
+            }
+        } catch (RuntimeException exception) {
+            return getCellText(sheetIndex, rowIndex, columnIndex);
+        }
+    }
+
+    /**
+     * Like getCellInput, but a formula gives its calculated result instead of
+     * "=...", so it can be pasted as a plain value (Paste Values).
+     */
+    public String getCellValueInput(
+            int sheetIndex,
+            int rowIndex,
+            int columnIndex
+    ) {
+        if (csvMode) {
+            return getCsvCell(sheetIndex, rowIndex, columnIndex);
+        }
+
+        Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
+
+        if (cell == null || cell.getCellType() != CellType.FORMULA) {
+            return getCellInput(sheetIndex, rowIndex, columnIndex);
+        }
+
+        try {
+            switch (cell.getCachedFormulaResultType()) {
+                case NUMERIC:
+                    if (DateUtil.isCellDateFormatted(cell)) {
+                        return getCellText(sheetIndex, rowIndex, columnIndex);
+                    }
+
+                    BigDecimal number = BigDecimal.valueOf(cell.getNumericCellValue());
+
+                    if (cell.getCellStyle().getDataFormatString().contains("%")) {
+                        return number.movePointRight(2).stripTrailingZeros().toPlainString() + "%";
+                    }
+
+                    return number.stripTrailingZeros().toPlainString();
+                case BOOLEAN:
+                    return cell.getBooleanCellValue() ? "TRUE" : "FALSE";
+                case STRING:
+                    return cell.getStringCellValue();
                 default:
                     return getCellText(sheetIndex, rowIndex, columnIndex);
             }

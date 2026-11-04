@@ -28,6 +28,34 @@ public class ModItems {
             *///?}
     );
 
+    public static final ResourceKey<Item> SHARED_WORKBOOK_KEY =
+            ResourceKey.create(Registries.ITEM, ExcelComputer.id("shared_workbook"));
+
+    // Only made by sharing a workbook, so it is not in a creative tab.
+    public static final Item SHARED_WORKBOOK = new SharedWorkbookItem(
+            //? if >=1.21.2 {
+            new Item.Properties()
+                    .setId(SHARED_WORKBOOK_KEY)
+                    .stacksTo(1)
+            //?} else {
+            /*new Item.Properties()
+                    .stacksTo(1)
+            *///?}
+    );
+
+    public static final ResourceKey<Item> EXCEL_PAPER_KEY =
+            ResourceKey.create(Registries.ITEM, ExcelComputer.id("excel_paper"));
+
+    // Blank paper; sharing a workbook (or copying a shared one) uses one up.
+    public static final Item EXCEL_PAPER = new Item(
+            //? if >=1.21.2 {
+            new Item.Properties()
+                    .setId(EXCEL_PAPER_KEY)
+            //?} else {
+            /*new Item.Properties()
+            *///?}
+    );
+
     //? if fabric {
     public static void initialize() {
         Registry.register(
@@ -35,9 +63,22 @@ public class ModItems {
                 EXCEL_ON_A_STICK_KEY,
                 EXCEL_ON_A_STICK
         );
+        Registry.register(
+                BuiltInRegistries.ITEM,
+                SHARED_WORKBOOK_KEY,
+                SHARED_WORKBOOK
+        );
+        Registry.register(
+                BuiltInRegistries.ITEM,
+                EXCEL_PAPER_KEY,
+                EXCEL_PAPER
+        );
 
         ItemGroupEvents.modifyEntriesEvent(CreativeModeTabs.TOOLS_AND_UTILITIES)
-                .register(entries -> entries.accept(EXCEL_ON_A_STICK));
+                .register(entries -> {
+                    entries.accept(EXCEL_ON_A_STICK);
+                    entries.accept(EXCEL_PAPER);
+                });
     }
 //?}
 }

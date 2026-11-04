@@ -139,7 +139,7 @@ public final class BorderMenu {
             CellFormat.LINE_DASHED, CellFormat.LINE_DOTTED, CellFormat.LINE_DOUBLE
     };
 
-    private static final int WIDTH = 168;
+    public static final int WIDTH = 168;
     private static final int ROW = 14;
     private static final int PAD = 4;
     private static final int SEPARATOR = 5;
@@ -151,7 +151,7 @@ public final class BorderMenu {
         return option == 3 || option == 7 || option == 10;
     }
 
-    private static final int HEIGHT;
+    public static final int HEIGHT;
     private static final int[] OPTION_Y = new int[OPTIONS.length];
     private static final int COLOR_Y;
     private static final int STYLE_LABEL_Y;

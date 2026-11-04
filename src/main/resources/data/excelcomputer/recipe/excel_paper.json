@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "GGG",
+    "GPG",
+    "GGG"
+  ],
+  "key": {
+    "P": "minecraft:paper",
+    "G": "minecraft:green_dye"
+  },
+  "result": {
+    "id": "excelcomputer:excel_paper",
+    "count": 1
+  }
+}

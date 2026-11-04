@@ -18,8 +18,8 @@ public final class ColorPalette {
     private static final int GAP = 2;
     private static final int PAD = 6;
     private static final int STRIP = 16;
-    private static final int WIDTH = PAD * 2 + COLUMNS * SWATCH + (COLUMNS - 1) * GAP;
-    private static final int HEIGHT =
+    public static final int WIDTH = PAD * 2 + COLUMNS * SWATCH + (COLUMNS - 1) * GAP;
+    public static final int HEIGHT =
             PAD + STRIP + 4 + THEME_ROWS * (SWATCH + GAP) + 4 + SWATCH + PAD;
 
     private static final int[] THEME = {

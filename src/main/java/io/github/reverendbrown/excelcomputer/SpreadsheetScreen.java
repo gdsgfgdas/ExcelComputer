@@ -1,5 +1,8 @@
 package io.github.reverendbrown.excelcomputer;
 
+import io.github.reverendbrown.excelcomputer.share.ShareClient;
+import io.github.reverendbrown.excelcomputer.share.ShareProtocol;
+import io.github.reverendbrown.excelcomputer.share.SharedWorkbook;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -24,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -50,7 +54,7 @@ public class SpreadsheetScreen extends Screen {
     private static final int RIBBON_GROUP_LABEL_Y = RIBBON_ROW2_Y + BUTTON_HEIGHT + 4;
     private static final int RIBBON_PANEL_BOTTOM = RIBBON_GROUP_LABEL_Y + 8 + 3;
 
-    // Formula bar (the cell editor, Apply and Save), below the ribbon.
+    // Formula bar (the cell editor and Save), below the ribbon.
     private static final int FORMULA_PANEL_TOP = RIBBON_PANEL_BOTTOM + 4;
     private static final int FORMULA_Y = FORMULA_PANEL_TOP + 2;
     private static final int FORMULA_PANEL_BOTTOM = FORMULA_Y + BUTTON_HEIGHT + 2;
@@ -81,7 +85,8 @@ public class SpreadsheetScreen extends Screen {
     private static final int RESIZE_GRAB = 4;
 
     // Zoom slider range, in percent.
-    private static final int MIN_ZOOM = 10;
+    // Below about 30% cells get too small for text and layout to behave.
+    private static final int MIN_ZOOM = 30;
     private static final int MAX_ZOOM = 300;
 
     // Smallest size a column or row is drawn at, however far you zoom out.
@@ -101,6 +106,10 @@ public class SpreadsheetScreen extends Screen {
             "(?<![A-Za-z0-9_.])(\\$?)([A-Za-z]{1,3})(\\$?)(\\d+)(?![A-Za-z0-9_(!])");
 
     private final Path workbookPath;
+    // Set when this workbook came from a shared workbook item.
+    private final SharedWorkbook shared;
+    // Where a player who doesn't own a shared workbook saves their own copy.
+    private Path sharedCopyPath;
     private WorkbookManager manager;
     private String status = "Opening workbook...";
 
@@ -186,6 +195,10 @@ public class SpreadsheetScreen extends Screen {
     private int textButtonX;
     private int sizeLabelX;
     private final FormatMenu formatMenu = new FormatMenu();
+    private final PasteMenu pasteMenu = new PasteMenu();
+    // The right-click menu on cells, and the formatting bar above it.
+    private final CellMenu cellMenu = new CellMenu();
+    private final MiniToolbar miniToolbar = buildMiniToolbar();
     private final FilterMenu filterMenu = new FilterMenu();
     private int formatButtonX;
 
@@ -201,6 +214,15 @@ public class SpreadsheetScreen extends Screen {
 
     // Copy/cut data: the raw input of every copied cell (formulas as "=...").
     private String[][] clipboardInputs;
+    // The calculated value of every copied cell (for Paste Values).
+    private String[][] clipboardValues;
+    // Unzoomed pixel sizes of the copied columns and rows, or null for a CSV
+    // file (which has no sizes). A row hidden by a filter is 0.
+    private int[] clipboardColumnWidths;
+    private int[] clipboardRowHeights;
+    // Style index of each copied cell (colors, font, borders, number format),
+    // or null for a CSV file, which has no formatting.
+    private int[][] clipboardStyles;
     private int clipboardRows;
     private int clipboardColumns;
     private int clipboardSourceRow;
@@ -226,7 +248,13 @@ public class SpreadsheetScreen extends Screen {
             // A formatting edit has style indexes (0 or more) and leaves the value
             // alone. A value edit has -1 for both.
             int previousStyle,
-            int newStyle
+            int newStyle,
+            // A size edit (from pasting) changes a column width (row is -1)
+            // or a row height (column is -1); the styles hold the pixel sizes.
+            boolean size,
+            // A table or filter change (Table / Filter buttons): the sheet's
+            // tables before and after it. Null for every other edit.
+            TableChange table
     ) {
         CellEdit(
                 int sheet,
@@ -236,8 +264,37 @@ public class SpreadsheetScreen extends Screen {
                 String newValue,
                 boolean chained
         ) {
-            this(sheet, row, column, previousValue, newValue, chained, -1, -1);
+            this(sheet, row, column, previousValue, newValue, chained, -1, -1, false, null);
         }
+
+        CellEdit(
+                int sheet,
+                int row,
+                int column,
+                String previousValue,
+                String newValue,
+                boolean chained,
+                int previousStyle,
+                int newStyle
+        ) {
+            this(sheet, row, column, previousValue, newValue, chained, previousStyle, newStyle, false, null);
+        }
+
+        static CellEdit resize(int sheet, int row, int column, boolean chained, int previous, int updated) {
+            return new CellEdit(sheet, row, column, "", "", chained, previous, updated, true, null);
+        }
+
+        // row and column: the cell that undo/redo selects (the table's top-left corner).
+        static CellEdit tableChange(int sheet, int row, int column, TableChange change) {
+            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, change);
+        }
+    }
+
+    private record TableChange(
+            WorkbookManager.TableState before,
+            WorkbookManager.TableState after,
+            String description
+    ) {
     }
 
     // Opening and saving run on this thread, so a big workbook does not freeze
@@ -255,8 +312,13 @@ public class SpreadsheetScreen extends Screen {
     private CompletableFuture<Void> pendingSave;
 
     public SpreadsheetScreen(Path workbookPath) {
+        this(workbookPath, null);
+    }
+
+    public SpreadsheetScreen(Path workbookPath, SharedWorkbook shared) {
         super(Component.literal("Excel on a Stick"));
         this.workbookPath = workbookPath;
+        this.shared = shared;
         applyGuiScale();
 
         status = "Opening " + workbookPath.getFileName() + "...";
@@ -285,7 +347,13 @@ public class SpreadsheetScreen extends Screen {
         if (pendingOpen != null && pendingOpen.isDone()) {
             try {
                 manager = pendingOpen.join();
-                status = "Workbook: " + workbookPath.getFileName();
+                status = shared == null
+                        ? "Workbook: " + workbookPath.getFileName()
+                        : shared.owner()
+                        ? "Shared workbook, " + ShareProtocol.describeExpiry(shared.expiresAt())
+                                + ". Saving updates it for everyone"
+                        : "Shared by " + shared.ownerName() + ", " + ShareProtocol.describeExpiry(shared.expiresAt())
+                                + ". Saving keeps a copy in your workbooks";
                 opened = true;
                 restoreViewState();
             } catch (CompletionException | CancellationException exception) {
@@ -303,6 +371,7 @@ public class SpreadsheetScreen extends Screen {
                 dirty = false;
                 discardArmed = false;
                 status = "Saved: " + workbookPath.getFileName();
+                afterSharedSave();
             } catch (CompletionException | CancellationException exception) {
                 status = "Save failed: " + messageOf(exception);
             }
@@ -490,10 +559,95 @@ public class SpreadsheetScreen extends Screen {
         discardArmed = false;
     }
 
+    // ----- the window -----
+    // The spreadsheet is drawn in a window in the middle of the screen, so the
+    // game stays visible around it. Everything inside is laid out and drawn as
+    // if the window were the whole screen (this.width and this.height are the
+    // window's size), then moved into place: drawing is translated by the
+    // window's corner, mouse positions are converted into window coordinates,
+    // and the widgets are moved onto their real screen positions.
+
+    // Full screen instead of a window (the button in the title bar). Kept
+    // while the game runs, for every workbook.
+    private static boolean maximized;
+
+    private int windowX;
+    private int windowY;
+    // The real mouse position, for drawing the widgets (see renderWidgets).
+    private int screenMouseX;
+    private int screenMouseY;
+
+    // Right edge of the widest ribbon laid out so far (the Home tab). The
+    // ribbon has a fixed layout, so the window is never made narrower than this.
+    private static int widestRibbon;
+
+    // Size of the maximize button in the title bar, measured from the window's right edge.
+    private static final int MAXIMIZE_RIGHT = 24;
+    private static final int MAXIMIZE_WIDTH = 16;
+
     @Override
     protected void init() {
+        int screenWidth = this.minecraft.getWindow().getGuiScaledWidth();
+        int screenHeight = this.minecraft.getWindow().getGuiScaledHeight();
+        int marginX = maximized ? 0 : Math.max(12, screenWidth / 14);
+        int marginY = maximized ? 0 : Math.max(10, screenHeight / 14);
+
+        // Too small a screen for a window: use all of it.
+        if (screenWidth - marginX * 2 < 400 || screenHeight - marginY * 2 < 260) {
+            marginX = 0;
+            marginY = 0;
+        }
+
+        // Never narrower than the ribbon: shrink the side margins instead.
+        int ribbonNeeds = widestRibbon + 14;
+
+        if (screenWidth - marginX * 2 < ribbonNeeds) {
+            marginX = Math.max(0, (screenWidth - ribbonNeeds) / 2);
+        }
+
+        windowX = marginX;
+        windowY = marginY;
+        this.width = screenWidth - marginX * 2;
+        this.height = screenHeight - marginY * 2;
+
+        layoutWidgets();
+
+        // The first time, the ribbon's width is only known after laying it out.
+        if (marginX > 0 && widestRibbon + 14 > this.width) {
+            marginX = Math.max(0, (screenWidth - widestRibbon - 14) / 2);
+            windowX = marginX;
+            this.width = screenWidth - marginX * 2;
+            this.clearWidgets();
+            layoutWidgets();
+        }
+
+        this.addRenderableWidget(
+                Button.builder(Component.literal(maximized ? "o" : "[ ]"), button -> {
+                    maximized = !maximized;
+                    rebuildWidgets();
+                }).bounds(this.width - MAXIMIZE_RIGHT, 8, MAXIMIZE_WIDTH, BUTTON_HEIGHT)
+                        .tooltip(Tooltip.create(Component.literal(maximized ? "Show as a window" : "Full screen")))
+                        .build()
+        );
+
+        // Move every widget from window coordinates onto the screen.
+        for (net.minecraft.client.gui.components.events.GuiEventListener child : this.children()) {
+            if (child instanceof net.minecraft.client.gui.components.AbstractWidget widget) {
+                widget.setX(widget.getX() + windowX);
+                widget.setY(widget.getY() + windowY);
+            }
+        }
+    }
+
+    // The game keeps running behind the window, even in singleplayer.
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
+    private void layoutWidgets() {
         cellEditor = new EditBox(
-                this.font, 100, FORMULA_Y, Math.max(100, this.width - 100 - 135 - 8), BUTTON_HEIGHT,
+                this.font, 100, FORMULA_Y, Math.max(100, this.width - 100 - 70 - 8), BUTTON_HEIGHT,
                 Component.literal("Cell value")
         );
         cellEditor.setMaxLength(1000);
@@ -508,13 +662,6 @@ public class SpreadsheetScreen extends Screen {
                         .bounds(FX_X, FORMULA_Y, FX_WIDTH, BUTTON_HEIGHT)
                         .tooltip(Tooltip.create(Component.literal("Insert Function")))
                         .build()
-        );
-
-        this.addRenderableWidget(
-                Button.builder(Component.literal("Apply"), button -> {
-                    commitPendingEdit();
-                    status = "Applied cell edit";
-                }).bounds(this.width - 135, FORMULA_Y, 60, BUTTON_HEIGHT).build()
         );
 
         this.addRenderableWidget(
@@ -540,6 +687,17 @@ public class SpreadsheetScreen extends Screen {
                         requestExit()
                 ).bounds(10, this.height - BOTTOM_ROW_OFFSET, 70, BUTTON_HEIGHT).build()
         );
+
+        if (shared != null) {
+            this.addRenderableWidget(
+                    Button.builder(Component.literal("Copy item"), button ->
+                            ShareClient.requestCopy(shared.id(), message -> status = message)
+                    ).bounds(85, this.height - BOTTOM_ROW_OFFSET, 60, BUTTON_HEIGHT)
+                            .tooltip(Tooltip.create(Component.literal(
+                                    "Get another item for this shared workbook to give to someone. Costs 1 Excel Paper (free in creative).")))
+                            .build()
+            );
+        }
 
         addRibbonButtons();
 
@@ -574,16 +732,19 @@ public class SpreadsheetScreen extends Screen {
         status = "Worksheet: " + manager.getSheetName(sheetIndex);
     }
 
-    // Before 1.21.6, Screen.render() draws the blurred menu background itself,
-    // after our own drawing, which blurs the whole spreadsheet. This turns that
-    // off. (Newer versions draw it earlier, so our drawing covers it.)
-    //? if >=1.21.6 {
-    //?} elif >=1.20.2 {
+    // No darkened or blurred menu background: the game stays visible around
+    // the window. (Before 1.21.6 it would also be drawn over the spreadsheet.)
+    //? if >=26.1 {
     /*@Override
+    public void extractBackground(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    }
+
+    *///?} elif >=1.20.2 {
+    @Override
     public void renderBackground(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
     }
 
-    *///?} else {
+    //?} else {
     /*@Override
     public void renderBackground(GuiGraphics graphics) {
     }
@@ -601,6 +762,62 @@ public class SpreadsheetScreen extends Screen {
             int mouseY,
             float partialTick
     ) {
+        screenMouseX = mouseX;
+        screenMouseY = mouseY;
+
+        if (windowX > 0 || windowY > 0) {
+            // A shadow and an outline around the window.
+            graphics.fill(windowX - 3, windowY - 3, windowX + this.width + 3, windowY + this.height + 3, 0x40000000);
+            graphics.fill(windowX - 1, windowY - 1, windowX + this.width + 1, windowY + this.height + 1, 0xFF5F6368);
+        }
+
+        pushWindowTransform(graphics);
+        renderWindow(graphics, mouseX - windowX, mouseY - windowY, partialTick);
+        popWindowTransform(graphics);
+    }
+
+    // Draws the widgets (buttons, edit box, slider). They already sit at their
+    // screen positions, so the window translation is taken off while they draw.
+    private void renderWidgets(GuiGraphics graphics, float partialTick) {
+        popWindowTransform(graphics);
+        super.render(graphics, screenMouseX, screenMouseY, partialTick);
+        pushWindowTransform(graphics);
+    }
+
+    //? if >=1.21.6 {
+    private void pushWindowTransform(GuiGraphics graphics) {
+        graphics.pose().pushMatrix();
+        graphics.pose().translate(windowX, windowY);
+    }
+
+    private void popWindowTransform(GuiGraphics graphics) {
+        graphics.pose().popMatrix();
+    }
+
+    // Clips drawing to a rectangle in window coordinates (the translation
+    // applies to clipping on 1.21.6+).
+    private void enableWindowScissor(GuiGraphics graphics, int left, int top, int right, int bottom) {
+        graphics.enableScissor(left, top, right, bottom);
+    }
+    //?} else {
+    /*private void pushWindowTransform(GuiGraphics graphics) {
+        graphics.pose().pushPose();
+        graphics.pose().translate(windowX, windowY, 0f);
+    }
+
+    private void popWindowTransform(GuiGraphics graphics) {
+        graphics.pose().popPose();
+    }
+
+    // Clips drawing to a rectangle in window coordinates. Clipping ignores
+    // the translation before 1.21.6, so the window's corner is added here.
+    private void enableWindowScissor(GuiGraphics graphics, int left, int top, int right, int bottom) {
+        graphics.enableScissor(left + windowX, top + windowY, right + windowX, bottom + windowY);
+    }
+    *///?}
+
+    // Everything inside the window, in window coordinates.
+    private void renderWindow(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         graphics.fill(0, 0, this.width, this.height, 0xFF202124);
         graphics.fill(0, 0, this.width, 26, 0xFF217346);
 
@@ -615,7 +832,7 @@ public class SpreadsheetScreen extends Screen {
         int statusX = 75 + this.font.width(fileLabel) + 20;
         graphics.drawString(
                 this.font,
-                this.font.plainSubstrByWidth(status, Math.max(0, this.width - 12 - statusX)),
+                this.font.plainSubstrByWidth(status, Math.max(0, this.width - MAXIMIZE_RIGHT - 8 - statusX)),
                 statusX, 9, 0xFFDDFFE6
         );
 
@@ -625,7 +842,7 @@ public class SpreadsheetScreen extends Screen {
                     pendingOpen != null ? "Loading the workbook..." : "Check that the workbook is valid.",
                     12, 72, pendingOpen != null ? 0xFF9AA0A6 : 0xFFFF7777
             );
-            super.render(graphics, mouseX, mouseY, partialTick);
+            renderWidgets(graphics, partialTick);
             return;
         }
 
@@ -709,7 +926,7 @@ public class SpreadsheetScreen extends Screen {
 
         // Everything in the grid is clipped to the grid area, so a column or
         // row at the edge can be partly visible.
-        graphics.enableScissor(10, GRID_Y, gridRight, gridBottom);
+        enableWindowScissor(graphics, 10, GRID_Y, gridRight, gridBottom);
 
         graphics.fill(GRID_X, GRID_Y, gridRight, GRID_Y + headerHeight, 0xFF3C4043);
 
@@ -891,10 +1108,11 @@ public class SpreadsheetScreen extends Screen {
                     continue;
                 }
 
-                float scale = textScale * format.fontPoints() / 11f;
+                float scale = crispTextScale(textScale * format.fontPoints() / 11f);
 
-                // Far zoomed out the text would be a smudge; skip it.
-                if (this.font.lineHeight * scale < 2f) {
+                // Text never gets smaller than readable (see crispTextScale);
+                // once the cell is too short for it, leave the text out.
+                if (8f * scale > ch) {
                     continue;
                 }
                 Component text = Component.literal(value).withStyle(
@@ -917,11 +1135,11 @@ public class SpreadsheetScreen extends Screen {
                         : tableHeader ? 0xFFFFFF : 0x202124);
 
                 // Clip long text to the cell instead of cutting characters.
-                graphics.enableScissor(x + 1, y + 1, x + cw - 1 - (hasArrow ? arrowWidth + 2 : 0), y + ch - 1);
+                enableWindowScissor(graphics, x + 1, y + 1, x + cw - 1 - (hasArrow ? arrowWidth + 2 : 0), y + ch - 1);
                 pushTextScale(
                         graphics,
-                        x + textX,
-                        y + (ch - this.font.lineHeight * scale) / 2f,
+                        snapToPixel(x + textX),
+                        snapToPixel(y + (ch - 8f * scale) / 2f),
                         scale
                 );
                 graphics.drawString(this.font, text, 0, 0, textColor, false);
@@ -934,7 +1152,7 @@ public class SpreadsheetScreen extends Screen {
 
         renderSheetBar(graphics, mouseX, mouseY);
 
-        super.render(graphics, mouseX, mouseY, partialTick);
+        renderWidgets(graphics, partialTick);
 
         renderRibbonOverlay(graphics, mouseX, mouseY);
     }
@@ -947,7 +1165,7 @@ public class SpreadsheetScreen extends Screen {
             double scrollX,
             double scrollY
     ) {
-        if (handleMouseScrolled(mouseX, mouseY, scrollX, scrollY)) {
+        if (handleMouseScrolled(mouseX - windowX, mouseY - windowY, scrollX, scrollY)) {
             return true;
         }
 
@@ -956,7 +1174,7 @@ public class SpreadsheetScreen extends Screen {
     //?} else {
     /*@Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        if (handleMouseScrolled(mouseX, mouseY, 0, delta)) {
+        if (handleMouseScrolled(mouseX - windowX, mouseY - windowY, 0, delta)) {
             return true;
         }
 
@@ -1095,12 +1313,15 @@ public class SpreadsheetScreen extends Screen {
             int left, int top, int width, int height, int padding
     ) {
         int textWidth = this.font.width(label);
-        float scale = Math.min(1f, Math.min(
+        float fit = Math.min(1f, Math.min(
                 (height - 2) / 8f,
                 (width - padding - 1) / (float) textWidth
         ));
+        // Round down to a sharp size, so the label still fits its header.
+        int gui = guiScale();
+        float scale = (float) Math.floor(fit * gui + 0.001f) / gui;
 
-        if (scale < 0.4f) {
+        if (scale <= 0f) {
             return;
         }
 
@@ -1111,9 +1332,34 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
-        pushTextScale(graphics, left + padding * scale, y, scale);
+        pushTextScale(graphics, snapToPixel(left + padding * scale), snapToPixel(y), scale);
         graphics.drawString(this.font, label, 0, 0, 0xFFFFFFFF);
         popTextScale(graphics);
+    }
+
+    // ----- sharp scaled text -----
+    // Minecraft's font is pixel art. Scaled text is only sharp when every font
+    // pixel covers a whole number of screen pixels and starts on a screen
+    // pixel; otherwise some pixel columns get doubled and others dropped,
+    // and small text turns into a smudge.
+
+    // Screen pixels per GUI pixel.
+    private int guiScale() {
+        return Math.max(1, (int) Math.round(this.minecraft.getWindow().getGuiScale()));
+    }
+
+    // Never below one screen pixel per font pixel: smaller than that, letters
+    // lose pixels and become unreadable. Above it the exact size is kept (not
+    // rounded to whole pixels), so every font size step changes the text size.
+    private float crispTextScale(float scale) {
+        int gui = guiScale();
+        return Math.max(1f / gui, scale);
+    }
+
+    // Moves a GUI position onto the nearest whole screen pixel.
+    private float snapToPixel(float position) {
+        int gui = guiScale();
+        return Math.round(position * gui) / (float) gui;
     }
 
     private static boolean isModifierKey(int key) {
@@ -1157,10 +1403,13 @@ public class SpreadsheetScreen extends Screen {
         }
 
         if ((palette.isOpen() || formatMenu.isOpen() || filterMenu.isOpen() || borderMenu.isOpen()
-                || functionMenu.isOpen())
+                || functionMenu.isOpen() || pasteMenu.isOpen() || cellMenu.isOpen() || miniToolbar.isOpen())
                 && key == GLFW.GLFW_KEY_ESCAPE) {
+            cellMenu.close();
+            miniToolbar.close();
             palette.close();
             formatMenu.close();
+            pasteMenu.close();
             filterMenu.close();
             borderMenu.close();
             functionMenu.close();
@@ -1206,7 +1455,8 @@ public class SpreadsheetScreen extends Screen {
                     return true;
                 }
                 if (key == GLFW.GLFW_KEY_V) {
-                    pasteClipboard();
+                    // Ctrl+Shift+V pastes only the values, like Excel's Paste Values.
+                    pasteClipboard(shift ? PasteMenu.Mode.VALUES : PasteMenu.Mode.ALL);
                     return true;
                 }
                 if (key == GLFW.GLFW_KEY_B) {
@@ -1246,7 +1496,12 @@ public class SpreadsheetScreen extends Screen {
             if (key == GLFW.GLFW_KEY_ENTER
                     || key == GLFW.GLFW_KEY_KP_ENTER) {
                 commitPendingEdit();
-                moveSelection(0, 1);
+
+                // Ctrl+Enter keeps the same cell selected, like Excel.
+                if (!ctrl) {
+                    moveSelection(0, 1);
+                }
+
                 return true;
             }
 
@@ -1573,7 +1828,27 @@ public class SpreadsheetScreen extends Screen {
         }
 
         String[][] inputs = new String[rows][columns];
+        String[][] values = new String[rows][columns];
+        int[][] styles = manager.getCellStyleIndex(sheetIndex, top, left) < 0
+                ? null
+                : new int[rows][columns];
         StringBuilder text = new StringBuilder();
+
+        // Column widths and row heights go along too (not for CSV, which has none).
+        int[] columnWidths = null;
+        int[] rowHeights = null;
+
+        if (styles != null) {
+            columnWidths = new int[columns];
+            rowHeights = new int[rows];
+
+            for (int c = 0; c < columns; c++) {
+                columnWidths[c] = baseColumnWidth(left + c);
+            }
+            for (int r = 0; r < rows; r++) {
+                rowHeights[r] = baseRowHeight(top + r);
+            }
+        }
 
         for (int r = 0; r < rows; r++) {
             for (int c = 0; c < columns; c++) {
@@ -1581,6 +1856,17 @@ public class SpreadsheetScreen extends Screen {
                         sheetIndex, top + r, left + c
                 );
                 inputs[r][c] = input == null ? "" : input;
+
+                String value = input != null && input.startsWith("=")
+                        ? manager.getCellValueInput(sheetIndex, top + r, left + c)
+                        : input;
+                values[r][c] = value == null ? "" : value;
+
+                if (styles != null) {
+                    styles[r][c] = manager.getCellStyleIndex(
+                            sheetIndex, top + r, left + c
+                    );
+                }
 
                 if (c > 0) {
                     text.append('\t');
@@ -1595,6 +1881,10 @@ public class SpreadsheetScreen extends Screen {
         }
 
         clipboardInputs = inputs;
+        clipboardValues = values;
+        clipboardColumnWidths = columnWidths;
+        clipboardRowHeights = rowHeights;
+        clipboardStyles = styles;
         clipboardRows = rows;
         clipboardColumns = columns;
         clipboardSourceRow = top;
@@ -1609,9 +1899,14 @@ public class SpreadsheetScreen extends Screen {
                 + rangeRef(top, left, bottom, right);
     }
 
-    // Ctrl+V: pastes at the top-left of the selection. A single copied cell
-    // fills the whole selection. Pasting is one undo step.
-    private void pasteClipboard() {
+    // Pastes at the top-left of the selection. A single copied cell fills the
+    // whole selection. Pasting is one undo step. The mode (the Paste dropdown)
+    // picks what is pasted: Ctrl+V pastes the contents, and cells copied in
+    // this workbook bring their formatting (colors, font, borders, number
+    // format), but not their column widths and row heights (that is the
+    // "With Widths & Heights" option); Ctrl+Shift+V pastes only the
+    // calculated values.
+    private void pasteClipboard(PasteMenu.Mode mode) {
         if (manager == null) {
             return;
         }
@@ -1637,7 +1932,22 @@ public class SpreadsheetScreen extends Screen {
         boolean internal = clipboardInputs != null && clipboardText != null
                 && normalized.equals(normalizeLineEndings(clipboardText));
 
-        String[][] grid = internal ? clipboardInputs : parseTsv(normalized);
+        // Formatting and sizes only exist for cells copied in this workbook.
+        if (!mode.contents() && !internal) {
+            status = "Only cells copied here can paste "
+                    + (mode.sizes() ? "widths and heights" : "formatting");
+            return;
+        }
+
+        String[][] grid;
+
+        if (!internal) {
+            grid = parseTsv(normalized);
+        } else if (mode == PasteMenu.Mode.VALUES && clipboardValues != null) {
+            grid = clipboardValues;
+        } else {
+            grid = clipboardInputs;
+        }
 
         if (grid.length == 0 || grid[0].length == 0) {
             status = "Nothing to paste";
@@ -1645,6 +1955,13 @@ public class SpreadsheetScreen extends Screen {
         }
 
         boolean cut = internal && clipboardCut;
+
+        // Cut cells move with their contents, so they need a paste that has them.
+        if (cut && !mode.contents()) {
+            status = "Cut cells can only be pasted with Paste, Formulas or Values";
+            return;
+        }
+
         int top = rangeTop();
         int left = rangeLeft();
 
@@ -1659,11 +1976,77 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
+        // Formatting only travels within this workbook (style indexes belong
+        // to it) and never into a CSV file.
+        boolean targetHasFormats = manager.getCellStyleIndex(sheetIndex, top, left) >= 0;
+        boolean pasteFormats = mode.formatting() && internal && clipboardStyles != null
+                && targetHasFormats;
+        // Widths and heights follow the copied block; one cell filling a
+        // bigger selection leaves the sizes alone.
+        boolean pasteSizes = mode.sizes() && internal && !fill && targetHasFormats
+                && clipboardColumnWidths != null && clipboardRowHeights != null;
+
+        if (!mode.contents() && !pasteFormats && !pasteSizes) {
+            status = "Nothing to paste here";
+            return;
+        }
+
         boolean hasEarlierEdit = false;
         int changed = 0;
         int skipped = 0;
 
+        // Column widths and row heights first, so the cells' own height fits
+        // below don't get undone by them.
+        if (pasteSizes) {
+            for (int c = 0; c < pasteColumns && c < clipboardColumnWidths.length; c++) {
+                int column = left + c;
+                int width = clipboardColumnWidths[c];
+                int current = baseColumnWidth(column);
+
+                if (width <= 0 || width == current) {
+                    continue;
+                }
+
+                try {
+                    manager.setColumnWidthPixels(sheetIndex, column, width);
+                    columnWidthCache.put(sizeKey(sheetIndex, column), width);
+                    undoHistory.push(CellEdit.resize(
+                            sheetIndex, -1, column, hasEarlierEdit, current, width
+                    ));
+                    hasEarlierEdit = true;
+                    changed++;
+                } catch (RuntimeException exception) {
+                    skipped++;
+                }
+            }
+
+            for (int r = 0; r < pasteRows && r < clipboardRowHeights.length; r++) {
+                int row = top + r;
+                int height = clipboardRowHeights[r];
+                int current = baseRowHeight(row);
+
+                // A row hidden by a filter (height 0), here or in the copy, is left alone.
+                if (height <= 0 || current <= 0 || height == current) {
+                    continue;
+                }
+
+                try {
+                    manager.setRowHeightPixels(sheetIndex, row, height);
+                    rowHeightCache.put(sizeKey(sheetIndex, row), height);
+                    undoHistory.push(CellEdit.resize(
+                            sheetIndex, row, -1, hasEarlierEdit, current, height
+                    ));
+                    hasEarlierEdit = true;
+                    changed++;
+                } catch (RuntimeException exception) {
+                    skipped++;
+                }
+            }
+        }
+
         for (int r = 0; r < pasteRows; r++) {
+            int largestFont = 0;
+
             for (int c = 0; c < pasteColumns; c++) {
                 int targetRow = top + r;
                 int targetColumn = left + c;
@@ -1690,33 +2073,61 @@ public class SpreadsheetScreen extends Screen {
                     previous = "";
                 }
 
-                if (previous.equals(input)) {
-                    continue;
-                }
-
                 try {
-                    int[] styles = manager.setCellValueDeferred(
-                            sheetIndex, targetRow, targetColumn, input
-                    );
+                    if (mode.contents() && !previous.equals(input)) {
+                        int[] styles = manager.setCellValueDeferred(
+                                sheetIndex, targetRow, targetColumn, input
+                        );
 
-                    undoHistory.push(new CellEdit(
-                            sheetIndex, targetRow, targetColumn,
-                            previous, input, hasEarlierEdit
-                    ));
-
-                    if (styles != null) {
                         undoHistory.push(new CellEdit(
-                                sheetIndex, targetRow, targetColumn, "", "",
-                                true, styles[0], styles[1]
+                                sheetIndex, targetRow, targetColumn,
+                                previous, input, hasEarlierEdit
                         ));
+                        hasEarlierEdit = true;
+
+                        if (styles != null) {
+                            undoHistory.push(new CellEdit(
+                                    sheetIndex, targetRow, targetColumn, "", "",
+                                    true, styles[0], styles[1]
+                            ));
+                        }
+
+                        changed++;
                     }
 
-                    hasEarlierEdit = true;
-                    changed++;
+                    // Then the copied formatting, which replaces any format the
+                    // value picked up on its own (for example "$" -> currency).
+                    if (pasteFormats) {
+                        int style = clipboardStyles[sourceR][sourceC];
+                        int current = manager.getCellStyleIndex(
+                                sheetIndex, targetRow, targetColumn
+                        );
+
+                        if (style != current) {
+                            manager.setCellStyleIndex(
+                                    sheetIndex, targetRow, targetColumn, style
+                            );
+                            undoHistory.push(new CellEdit(
+                                    sheetIndex, targetRow, targetColumn, "", "",
+                                    hasEarlierEdit, current, style
+                            ));
+                            hasEarlierEdit = true;
+                            changed++;
+                        }
+
+                        largestFont = Math.max(largestFont, manager.getCellFormat(
+                                sheetIndex, targetRow, targetColumn
+                        ).fontPoints());
+                    }
                 } catch (RuntimeException exception) {
                     // For example an invalid formula; leave that cell as is.
                     skipped++;
                 }
+            }
+
+            // Bigger pasted text gets a taller row, as when setting the size.
+            if (largestFont > 0) {
+                fitRowHeights(top + r, top + r, largestFont);
             }
         }
 
@@ -1740,22 +2151,40 @@ public class SpreadsheetScreen extends Screen {
                             clipboardSheet, sourceRow, sourceColumn
                     );
 
-                    if (previous == null || previous.isEmpty()) {
-                        continue;
-                    }
-
                     try {
-                        manager.setCellValueDeferred(
-                                clipboardSheet, sourceRow, sourceColumn, ""
-                        );
+                        if (previous != null && !previous.isEmpty()) {
+                            manager.setCellValueDeferred(
+                                    clipboardSheet, sourceRow, sourceColumn, ""
+                            );
 
-                        undoHistory.push(new CellEdit(
-                                clipboardSheet, sourceRow, sourceColumn,
-                                previous, "", hasEarlierEdit
-                        ));
+                            undoHistory.push(new CellEdit(
+                                    clipboardSheet, sourceRow, sourceColumn,
+                                    previous, "", hasEarlierEdit
+                            ));
 
-                        hasEarlierEdit = true;
-                        changed++;
+                            hasEarlierEdit = true;
+                            changed++;
+                        }
+
+                        // The formatting moved with the cells, so the old
+                        // place goes back to the default style.
+                        if (pasteFormats) {
+                            int style = manager.getCellStyleIndex(
+                                    clipboardSheet, sourceRow, sourceColumn
+                            );
+
+                            if (style > 0) {
+                                manager.setCellStyleIndex(
+                                        clipboardSheet, sourceRow, sourceColumn, 0
+                                );
+                                undoHistory.push(new CellEdit(
+                                        clipboardSheet, sourceRow, sourceColumn, "", "",
+                                        hasEarlierEdit, style, 0
+                                ));
+                                hasEarlierEdit = true;
+                                changed++;
+                            }
+                        }
                     } catch (RuntimeException exception) {
                         skipped++;
                     }
@@ -1763,6 +2192,10 @@ public class SpreadsheetScreen extends Screen {
             }
 
             clipboardInputs = null;
+            clipboardValues = null;
+            clipboardColumnWidths = null;
+            clipboardRowHeights = null;
+            clipboardStyles = null;
             clipboardText = null;
             clipboardCut = false;
         }
@@ -1783,7 +2216,11 @@ public class SpreadsheetScreen extends Screen {
         scrollSelectionIntoView();
         refreshEditor();
 
-        status = "Pasted " + rangeRef(top, left, rangeEndRow, rangeEndColumn)
+        String what = mode == PasteMenu.Mode.ALL
+                ? ""
+                : " " + mode.label().replaceAll(" \\(.*\\)", "").toLowerCase(Locale.ROOT);
+
+        status = "Pasted" + what + " to " + rangeRef(top, left, rangeEndRow, rangeEndColumn)
                 + (skipped > 0 ? " (" + skipped + " cells skipped)" : "");
     }
 
@@ -1803,7 +2240,10 @@ public class SpreadsheetScreen extends Screen {
                 applyEdit(edit, false);
 
                 redoHistory.push(edit);
-                last = edit;
+
+                if (!edit.size() || last == null) {
+                    last = edit;
+                }
                 continueGroup = edit.chained() && !undoHistory.isEmpty();
             } catch (RuntimeException exception) {
                 undoHistory.push(edit);
@@ -1816,15 +2256,27 @@ public class SpreadsheetScreen extends Screen {
         manager.recalculate();
         markDirty();
 
+        selectAfterHistory(last);
+        status = last.table() != null
+                ? "Undid: " + last.table().description()
+                : last.size()
+                ? "Undid size change"
+                : "Undid edit to " + cellRef(selectedRow, selectedColumn);
+    }
+
+    // After undo/redo: shows the sheet and selects the cell that changed (a
+    // column width or row height change leaves the selection where it is).
+    private void selectAfterHistory(CellEdit last) {
         sheetIndex = last.sheet();
-        selectedRow = last.row();
-        selectedColumn = last.column();
-        collapseRange();
+
+        if (!last.size()) {
+            selectedRow = last.row();
+            selectedColumn = last.column();
+            collapseRange();
+        }
 
         scrollSelectionIntoView();
-
         refreshEditor();
-        status = "Undid edit to " + cellRef(selectedRow, selectedColumn);
     }
 
     private void redoLastEdit() {
@@ -1843,7 +2295,10 @@ public class SpreadsheetScreen extends Screen {
                 applyEdit(edit, true);
 
                 undoHistory.push(edit);
-                last = edit;
+
+                if (!edit.size() || last == null) {
+                    last = edit;
+                }
             } catch (RuntimeException exception) {
                 redoHistory.push(edit);
                 status = "Redo failed: " + exception.getMessage();
@@ -1859,15 +2314,12 @@ public class SpreadsheetScreen extends Screen {
         manager.recalculate();
         markDirty();
 
-        sheetIndex = last.sheet();
-        selectedRow = last.row();
-        selectedColumn = last.column();
-        collapseRange();
-
-        scrollSelectionIntoView();
-
-        refreshEditor();
-        status = "Redid edit to " + cellRef(selectedRow, selectedColumn);
+        selectAfterHistory(last);
+        status = last.table() != null
+                ? "Redid: " + last.table().description()
+                : last.size()
+                ? "Redid size change"
+                : "Redid edit to " + cellRef(selectedRow, selectedColumn);
     }
 
     //? if >=1.21.9 {
@@ -2169,7 +2621,7 @@ public class SpreadsheetScreen extends Screen {
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         if (handleMouseClicked(
-                event.x(), event.y(), event.button(), event.hasShiftDown()
+                event.x() - windowX, event.y() - windowY, event.button(), event.hasShiftDown()
         )) {
             return true;
         }
@@ -2179,7 +2631,7 @@ public class SpreadsheetScreen extends Screen {
     //?} else {
     /*@Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (handleMouseClicked(mouseX, mouseY, button, hasShiftDown())) {
+        if (handleMouseClicked(mouseX - windowX, mouseY - windowY, button, hasShiftDown())) {
             return true;
         }
 
@@ -2199,6 +2651,59 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // The formatting bar above the right-click menu. Like Excel, using it
+        // closes the menu but keeps the bar, so you can apply several formats.
+        if (miniToolbar.isOpen() && button == 0 && miniToolbar.contains(mouseX, mouseY)) {
+            MiniToolbar.Item item = miniToolbar.itemAt(mouseX, mouseY);
+
+            if (item != null && item.action() != null) {
+                cellMenu.close();
+                item.action().run();
+            }
+
+            return true;
+        }
+
+        miniToolbar.close();
+
+        // The right-click menu: a left click picks an item; any click closes it.
+        if (cellMenu.isOpen()) {
+            CellMenu.Action action = button == 0 ? cellMenu.actionAt(mouseX, mouseY) : null;
+            boolean inside = cellMenu.contains(mouseX, mouseY);
+
+            if (action != null) {
+                runCellMenuAction(action);
+            }
+
+            cellMenu.close();
+
+            // A right click elsewhere on the grid goes on to open the menu there.
+            if (inside || button != 1) {
+                return true;
+            }
+        }
+
+        // Right-clicking a cell opens the right-click menu. A cell outside
+        // the selection gets selected first, as in Excel.
+        if (button == 1 && manager != null && insideGrid(mouseX, mouseY)) {
+            int column = Math.max(0, columnAt(mouseX));
+            int row = Math.max(0, rowAt(mouseY));
+
+            commitPendingEdit();
+
+            if (row < rangeTop() || row > rangeBottom() || column < rangeLeft() || column > rangeRight()) {
+                selectedRow = row;
+                selectedColumn = column;
+                collapseRange();
+                refreshEditor();
+            }
+
+            closePopups();
+            cellMenu.open((int) mouseX, (int) mouseY, this.width, this.height);
+            openMiniToolbar();
+            return true;
+        }
+
         // The filter list is a popup too: it stays open while you tick values.
         if (filterMenu.isOpen() && button == 0) {
             FilterMenu.Result result = filterMenu.click(mouseX, mouseY);
@@ -2209,6 +2714,19 @@ public class SpreadsheetScreen extends Screen {
 
             if (result != FilterMenu.Result.NONE) {
                 filterMenu.close();
+            }
+
+            return true;
+        }
+
+        // The Paste dropdown: the different ways to paste.
+        if (pasteMenu.isOpen() && button == 0) {
+            PasteMenu.Mode mode = pasteMenu.modeAt(mouseX, mouseY);
+
+            pasteMenu.close();
+
+            if (mode != null) {
+                pasteClipboard(mode);
             }
 
             return true;
@@ -2245,6 +2763,7 @@ public class SpreadsheetScreen extends Screen {
                 && mouseY >= FORMULA_Y && mouseY < FORMULA_Y + BUTTON_HEIGHT) {
             palette.close();
             formatMenu.close();
+            pasteMenu.close();
             borderMenu.close();
             filterMenu.close();
             functionMenu.open(FX_X, FORMULA_PANEL_BOTTOM + 2, this.width);
@@ -2397,7 +2916,7 @@ public class SpreadsheetScreen extends Screen {
             double dragX,
             double dragY
     ) {
-        if (handleMouseDragged(event.x(), event.y())) {
+        if (handleMouseDragged(event.x() - windowX, event.y() - windowY)) {
             return true;
         }
 
@@ -2412,7 +2931,7 @@ public class SpreadsheetScreen extends Screen {
             double dragX,
             double dragY
     ) {
-        if (handleMouseDragged(mouseX, mouseY)) {
+        if (handleMouseDragged(mouseX - windowX, mouseY - windowY)) {
             return true;
         }
 
@@ -2644,14 +3163,44 @@ public class SpreadsheetScreen extends Screen {
         WorkbookManager workbook = manager;
         Path path = workbookPath;
 
-        status = "Saving " + workbookPath.getFileName() + "...";
+        // Someone else's shared workbook: save to a copy in this player's own workbooks.
+        if (shared != null && !shared.owner()) {
+            try {
+                if (sharedCopyPath == null) {
+                    sharedCopyPath = WorkbookFiles.freeWorkbookPath(shared.name());
+                }
+            } catch (IOException exception) {
+                status = "Save failed: " + exception.getMessage();
+                return;
+            }
+
+            path = sharedCopyPath;
+        }
+
+        Path target = path;
+        status = "Saving " + target.getFileName() + "...";
         pendingSave = CompletableFuture.runAsync(() -> {
             try {
-                workbook.save(path);
+                workbook.save(target);
             } catch (IOException exception) {
                 throw new CompletionException(exception);
             }
         }, WORKBOOK_IO);
+    }
+
+    // After a save: the owner of a shared workbook sends it to the server.
+    private void afterSharedSave() {
+        if (shared == null) {
+            return;
+        }
+
+        if (!shared.owner()) {
+            status = "Saved a copy to your workbooks: " + sharedCopyPath.getFileName();
+            return;
+        }
+
+        String error = ShareClient.upload(workbookPath, shared.id(), message -> status = message);
+        status = error != null ? "Saved here, but not shared: " + error : "Saved. Updating the shared copy...";
     }
 
     private static String columnName(int column) {
@@ -2724,6 +3273,8 @@ public class SpreadsheetScreen extends Screen {
             String tip,
             Runnable action
     ) {
+        widestRibbon = Math.max(widestRibbon, x + width);
+
         return this.addRenderableWidget(
                 Button.builder(label, button -> action.run())
                         .bounds(x, y, width, BUTTON_HEIGHT)
@@ -3041,6 +3592,7 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
         palette.close();
         formatMenu.close();
+        pasteMenu.close();
         borderMenu.close();
         ribbonTab = tab;
         rebuildWidgets();
@@ -3104,13 +3656,19 @@ public class SpreadsheetScreen extends Screen {
         int start = 14;
         int x = start;
 
-        addRibbonButton(x, row1, 56, Component.literal("Paste"), "Paste (Ctrl+V)",
-                this::pasteClipboard);
-        addRibbonButton(x, row2, 26, Component.literal("Cut"), "Cut (Ctrl+X)",
+        // Paste: the button pastes everything, the arrow opens the other paste types.
+        addRibbonButton(x, row1, 55, Component.literal("Paste"),
+                "Paste with formatting (Ctrl+V). Column widths and row heights stay as they are",
+                () -> pasteClipboard(PasteMenu.Mode.ALL));
+        final int pasteMenuX = x;
+        addRibbonButton(x + 57, row1, 12, Component.literal("v"),
+                "Paste options: formulas, values, formatting, widths and heights",
+                () -> togglePasteMenu(pasteMenuX));
+        addRibbonButton(x, row2, 31, Component.literal("Cut"), "Cut (Ctrl+X)",
                 () -> copySelection(true));
-        addRibbonButton(x + 28, row2, 28, Component.literal("Copy"), "Copy (Ctrl+C)",
+        addRibbonButton(x + 33, row2, 36, Component.literal("Copy"), "Copy (Ctrl+C)",
                 () -> copySelection(false));
-        start = endGroup("Clipboard", start, x + 56);
+        start = endGroup("Clipboard", start, x + 69);
 
         // ----- Font -----
         // Row 1: font size.
@@ -3219,6 +3777,7 @@ public class SpreadsheetScreen extends Screen {
     private void toggleBorderMenu(int anchorX) {
         palette.close();
         formatMenu.close();
+        pasteMenu.close();
         filterMenu.close();
 
         if (borderMenu.isOpen()) {
@@ -3248,6 +3807,7 @@ public class SpreadsheetScreen extends Screen {
 
     private void togglePalette(ColorPalette.Target target, int anchorX) {
         formatMenu.close();
+        pasteMenu.close();
         filterMenu.close();
         borderMenu.close();
 
@@ -3262,11 +3822,144 @@ public class SpreadsheetScreen extends Screen {
         palette.close();
         filterMenu.close();
         borderMenu.close();
+        pasteMenu.close();
 
         if (formatMenu.isOpen()) {
             formatMenu.close();
         } else {
             formatMenu.open(anchorX, RIBBON_ROW1_Y + BUTTON_HEIGHT + 2, this.width);
+        }
+    }
+
+    private void closePopups() {
+        palette.close();
+        formatMenu.close();
+        pasteMenu.close();
+        filterMenu.close();
+        borderMenu.close();
+        functionMenu.close();
+        cellMenu.close();
+        miniToolbar.close();
+    }
+
+    // The formatting bar shown with the right-click menu, laid out like
+    // Excel's mini toolbar. Every button does the same as its Home ribbon button.
+    private MiniToolbar buildMiniToolbar() {
+        MiniToolbar.Item[] fillArrow = new MiniToolbar.Item[1];
+        MiniToolbar.Item[] textArrow = new MiniToolbar.Item[1];
+        MiniToolbar.Item[] borderArrow = new MiniToolbar.Item[1];
+
+        fillArrow[0] = MiniToolbar.Item.button("v", 10, () -> {
+            int x = miniToolbar.itemX(fillArrow[0]) - 24;
+            closePopups();
+            palette.open(ColorPalette.Target.FILL, x, belowToolbar(ColorPalette.HEIGHT), this.width);
+        });
+        textArrow[0] = MiniToolbar.Item.button("v", 10, () -> {
+            int x = miniToolbar.itemX(textArrow[0]) - 16;
+            closePopups();
+            palette.open(ColorPalette.Target.TEXT, x, belowToolbar(ColorPalette.HEIGHT), this.width);
+        });
+        borderArrow[0] = MiniToolbar.Item.button("v", 10, () -> {
+            int x = miniToolbar.itemX(borderArrow[0]) - 40;
+            closePopups();
+            borderMenu.open(x, belowToolbar(BorderMenu.HEIGHT), this.width);
+        });
+
+        List<MiniToolbar.Item> top = List.of(
+                MiniToolbar.Item.button("-", 14, () -> changeFontSize(-1)),
+                new MiniToolbar.Item(
+                        () -> Component.literal(manager == null ? "" : Integer.toString(activeFormat().fontPoints())),
+                        16, null, null),
+                MiniToolbar.Item.button("+", 14, () -> changeFontSize(1)),
+                MiniToolbar.Item.button("$", 16, () -> applyNumberFormat("\"$\"#,##0.00")),
+                MiniToolbar.Item.button("%", 16, () -> applyNumberFormat("0%")),
+                MiniToolbar.Item.button(",", 16, () -> applyNumberFormat("#,##0.00")),
+                MiniToolbar.Item.button("+.0", 22,
+                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, 1))),
+                MiniToolbar.Item.button("-.0", 22,
+                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, -1))),
+                MiniToolbar.Item.button("Clear", 30,
+                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.RESET, 0)))
+        );
+
+        List<MiniToolbar.Item> bottom = List.of(
+                MiniToolbar.Item.button(Component.literal("B").withStyle(ChatFormatting.BOLD), 14,
+                        () -> toggleFlag(CellFormat.Kind.BOLD, activeFormat().bold())),
+                MiniToolbar.Item.button(Component.literal("I").withStyle(ChatFormatting.ITALIC), 14,
+                        () -> toggleFlag(CellFormat.Kind.ITALIC, activeFormat().italic())),
+                MiniToolbar.Item.button(Component.literal("U").withStyle(ChatFormatting.UNDERLINE), 14,
+                        () -> toggleFlag(CellFormat.Kind.UNDERLINE, activeFormat().underline())),
+                MiniToolbar.Item.button("L", 14, () -> applyAlignment(1)),
+                MiniToolbar.Item.button("C", 14, () -> applyAlignment(2)),
+                MiniToolbar.Item.button("R", 14, () -> applyAlignment(3)),
+                new MiniToolbar.Item(() -> Component.literal("Fill"), 24,
+                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.FILL, lastFillColor)),
+                        () -> lastFillColor),
+                fillArrow[0],
+                new MiniToolbar.Item(() -> Component.literal("A"), 16,
+                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.FONT_COLOR, lastTextColor)),
+                        () -> lastTextColor),
+                textArrow[0],
+                MiniToolbar.Item.button("Borders", 40, () -> applyBorder(lastBorder)),
+                borderArrow[0]
+        );
+
+        return new MiniToolbar(List.of(top, bottom));
+    }
+
+    // Shows the formatting bar above the right-click menu (below it if there is no room).
+    private void openMiniToolbar() {
+        int x = Math.max(4, Math.min(cellMenu.x(), this.width - miniToolbar.width() - 4));
+        int above = cellMenu.y() - miniToolbar.height() - 4;
+        int y = above >= 4
+                ? above
+                : Math.min(cellMenu.y() + cellMenu.menuHeight() + 4, this.height - miniToolbar.height() - 4);
+
+        miniToolbar.open(x, Math.max(4, y));
+    }
+
+    // Where a dropdown from the formatting bar opens: under the bar, kept on screen.
+    private int belowToolbar(int popupHeight) {
+        return popupY(miniToolbar.y() + miniToolbar.height() + 2, popupHeight);
+    }
+
+    // Does what was picked in the right-click menu. Options with their own
+    // list (Paste Options, Number Format, Insert Function) open it beside the menu.
+    private void runCellMenuAction(CellMenu.Action action) {
+        int besideX = cellMenu.x() + cellMenu.width() + 2;
+        int rowY = cellMenu.rowY(action);
+
+        switch (action) {
+            case CUT -> copySelection(true);
+            case COPY -> copySelection(false);
+            case PASTE -> pasteClipboard(PasteMenu.Mode.ALL);
+            case PASTE_OPTIONS -> pasteMenu.open(
+                    besideX, popupY(rowY, PasteMenu.HEIGHT), this.width);
+            case CLEAR -> clearSelectedCells();
+            case NUMBER_FORMAT -> formatMenu.open(
+                    besideX, popupY(rowY, FormatMenu.HEIGHT), this.width);
+            case INSERT_FUNCTION -> functionMenu.open(
+                    besideX, popupY(rowY, FunctionMenu.HEIGHT), this.width);
+            case TABLE -> toggleTable();
+            case FILTER -> toggleFilter();
+        }
+    }
+
+    // A popup's top, moved up if it would run off the bottom of the screen.
+    private int popupY(int wantedY, int popupHeight) {
+        return Math.max(4, Math.min(wantedY, this.height - popupHeight - 4));
+    }
+
+    private void togglePasteMenu(int anchorX) {
+        palette.close();
+        filterMenu.close();
+        borderMenu.close();
+        formatMenu.close();
+
+        if (pasteMenu.isOpen()) {
+            pasteMenu.close();
+        } else {
+            pasteMenu.open(anchorX, RIBBON_ROW1_Y + BUTTON_HEIGHT + 2, this.width);
         }
     }
 
@@ -3411,7 +4104,22 @@ public class SpreadsheetScreen extends Screen {
 
     // Puts a value or formatting edit back (undo) or applies it again (redo).
     private void applyEdit(CellEdit edit, boolean forward) {
-        if (edit.previousStyle() >= 0) {
+        if (edit.table() != null) {
+            manager.restoreTableState(edit.sheet(), forward ? edit.table().after() : edit.table().before());
+            filterMenu.close();
+            // Filters may have hidden or shown rows.
+            rowHeightCache.clear();
+        } else if (edit.size()) {
+            int pixels = forward ? edit.newStyle() : edit.previousStyle();
+
+            if (edit.row() < 0) {
+                manager.setColumnWidthPixels(edit.sheet(), edit.column(), pixels);
+                columnWidthCache.put(sizeKey(edit.sheet(), edit.column()), pixels);
+            } else {
+                manager.setRowHeightPixels(edit.sheet(), edit.row(), pixels);
+                rowHeightCache.put(sizeKey(edit.sheet(), edit.row()), pixels);
+            }
+        } else if (edit.previousStyle() >= 0) {
             manager.setCellStyleIndex(
                     edit.sheet(), edit.row(), edit.column(),
                     forward ? edit.newStyle() : edit.previousStyle()
@@ -3464,8 +4172,11 @@ public class SpreadsheetScreen extends Screen {
         }
 
         beginOverlay(graphics);
+        cellMenu.render(graphics, this.font, mouseX, mouseY);
+        miniToolbar.render(graphics, this.font, mouseX, mouseY);
         palette.render(graphics, this.font, mouseX, mouseY);
         formatMenu.render(graphics, this.font, mouseX, mouseY, activeFormat().numberFormat());
+        pasteMenu.render(graphics, this.font, mouseX, mouseY);
         borderMenu.render(graphics, this.font, mouseX, mouseY, penStyle, penColor);
         functionMenu.render(graphics, this.font, mouseX, mouseY);
         filterMenu.render(graphics, this.font, mouseX, mouseY);
@@ -3640,6 +4351,7 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
         palette.close();
         formatMenu.close();
+        pasteMenu.close();
         borderMenu.close();
 
         int offset = column - table.left();
@@ -3715,14 +4427,25 @@ public class SpreadsheetScreen extends Screen {
             TableInfo existing = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
 
             if (existing != null && existing.isTable()) {
+                WorkbookManager.TableState before = manager.captureTableState(
+                        sheetIndex, existing.top(), existing.left(), existing.bottom(), existing.right());
+
                 manager.removeTable(sheetIndex, existing);
                 status = existing.name() + " is a normal range again";
+                recordTableChange(before, existing.top(), existing.left(), existing.bottom(), existing.right(),
+                        "turning " + existing.name() + " into a range");
             } else {
                 int[] area = selectionOrRegion();
+                // A table always has a header row and at least one data row.
+                int bottom = Math.max(area[2], area[0] + 1);
+                WorkbookManager.TableState before = manager.captureTableState(
+                        sheetIndex, area[0], area[1], bottom, area[3]);
+
                 TableInfo created = manager.createTable(
                         sheetIndex, area[0], area[1], area[2], area[3], "TableStyleMedium2");
 
                 status = "Created " + created.name();
+                recordTableChange(before, area[0], area[1], bottom, area[3], "creating " + created.name());
             }
 
             rowHeightCache.clear();
@@ -3732,6 +4455,20 @@ public class SpreadsheetScreen extends Screen {
         } catch (RuntimeException | LinkageError exception) {
             status = "Could not change the table: " + describe(exception);
         }
+    }
+
+    // Puts a Table or Filter change on the undo history, as one step.
+    // The area must be the same one the "before" state was captured for.
+    private void recordTableChange(
+            WorkbookManager.TableState before, int top, int left, int bottom, int right, String description
+    ) {
+        if (before == null) {
+            return;
+        }
+
+        WorkbookManager.TableState after = manager.captureTableState(sheetIndex, top, left, bottom, right);
+        undoHistory.push(CellEdit.tableChange(sheetIndex, top, left, new TableChange(before, after, description)));
+        redoHistory.clear();
     }
 
     // The Filter button: shows or hides the filter arrows (for a table, or for a plain range).
@@ -3747,13 +4484,23 @@ public class SpreadsheetScreen extends Screen {
             TableInfo existing = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
 
             if (existing != null) {
+                WorkbookManager.TableState before = manager.captureTableState(
+                        sheetIndex, existing.top(), existing.left(), existing.bottom(), existing.right());
+
                 manager.setFilterButtons(sheetIndex, existing, !existing.filterButtons());
                 status = existing.filterButtons() ? "Filter buttons hidden" : "Filter buttons shown";
+                recordTableChange(before, existing.top(), existing.left(), existing.bottom(), existing.right(),
+                        existing.filterButtons() ? "hiding the filter buttons" : "showing the filter buttons");
             } else {
                 int[] area = selectionOrRegion();
+                // A filter range always has a header row and at least one row below it.
+                int bottom = Math.max(area[2], area[0] + 1);
+                WorkbookManager.TableState before = manager.captureTableState(
+                        sheetIndex, area[0], area[1], bottom, area[3]);
 
                 manager.addFilterRange(sheetIndex, area[0], area[1], area[2], area[3]);
                 status = "Filter buttons added";
+                recordTableChange(before, area[0], area[1], bottom, area[3], "adding filter buttons");
             }
 
             rowHeightCache.clear();
@@ -3847,6 +4594,31 @@ public class SpreadsheetScreen extends Screen {
 
         private int sliderZoom() {
             return MIN_ZOOM + (int) Math.round(this.value * (MAX_ZOOM - MIN_ZOOM));
+        }
+
+        // Drawn here instead of with the vanilla sprites: their handle is
+        // taller than this short slider and stuck out under the window.
+        @Override
+        //? if >=26.1 {
+        /*public void extractWidgetRenderState(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        *///?} else {
+        public void renderWidget(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        //?}
+            int left = getX();
+            int top = getY();
+            int right = left + getWidth();
+            int bottom = top + getHeight();
+
+            graphics.fill(left, top, right, bottom, 0xFF5F6368);
+            graphics.fill(left + 1, top + 1, right - 1, bottom - 1, 0xFF2D2E30);
+
+            int handleWidth = 6;
+            int handleX = left + (int) Math.round(this.value * (getWidth() - handleWidth));
+            graphics.fill(handleX, top, handleX + handleWidth, bottom,
+                    isHoveredOrFocused() ? 0xFFFFFFFF : 0xFFBDC1C6);
+
+            graphics.drawCenteredString(Minecraft.getInstance().font, getMessage(),
+                    left + getWidth() / 2, top + (getHeight() - 8) / 2 + 1, 0xFFFFFFFF);
         }
     }
 }

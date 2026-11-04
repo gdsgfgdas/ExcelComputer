@@ -1,4 +1,6 @@
 {
   "block.excelcomputer.excel_computer": "Excel Computer",
-  "item.excelcomputer.excel_on_a_stick": "Excel on a Stick"
+  "item.excelcomputer.excel_on_a_stick": "Excel on a Stick",
+  "item.excelcomputer.excel_paper": "Excel Paper",
+  "item.excelcomputer.shared_workbook": "Shared Workbook"
 }

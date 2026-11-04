@@ -24,10 +24,10 @@ public final class FormatMenu {
             new Item("Text", "@")
     );
 
-    private static final int WIDTH = 150;
+    public static final int WIDTH = 150;
     private static final int ROW = 16;
     private static final int PAD = 4;
-    private static final int HEIGHT = PAD * 2 + ITEMS.size() * ROW;
+    public static final int HEIGHT = PAD * 2 + ITEMS.size() * ROW;
 
     private boolean open;
     private int x;

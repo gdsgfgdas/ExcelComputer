@@ -44,14 +44,14 @@ public final class FunctionMenu {
 
     private static final int COLUMNS = 2;
     private static final int ROWS = (FUNCTIONS.size() + COLUMNS - 1) / COLUMNS;
-    private static final int WIDTH = 236;
+    public static final int WIDTH = 236;
     private static final int PAD = 4;
     private static final int ROW = 12;
     private static final int TITLE = 13;
     private static final int COLUMN_WIDTH = (WIDTH - PAD * 2) / COLUMNS;
     private static final int LIST_TOP = PAD + TITLE;
     private static final int INFO_TOP = LIST_TOP + ROWS * ROW + 5;
-    private static final int HEIGHT = INFO_TOP + ROW * 2 + PAD;
+    public static final int HEIGHT = INFO_TOP + ROW * 2 + PAD;
 
     private boolean open;
     private int x;
