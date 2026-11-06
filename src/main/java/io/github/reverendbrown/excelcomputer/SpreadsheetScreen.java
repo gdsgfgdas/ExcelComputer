@@ -4651,15 +4651,15 @@ public class SpreadsheetScreen extends Screen {
         int row2 = RIBBON_ROW2_Y;
         int x = start;
 
-        addRibbonButton(x, row1, 26, Component.literal("Top"), "Top Align: text at the top of the cell",
+        addRibbonButton(x, row1, 16, Component.literal("T"), "Top Align: text at the top of the cell",
                 () -> applyVerticalAlignment(1));
-        x += 28;
-        addRibbonButton(x, row1, 38, Component.literal("Middle"), "Middle Align: text centered between top and bottom",
+        x += 18;
+        addRibbonButton(x, row1, 16, Component.literal("M"), "Middle Align: text centered between top and bottom",
                 () -> applyVerticalAlignment(2));
-        x += 40;
-        addRibbonButton(x, row1, 40, Component.literal("Bottom"), "Bottom Align: text at the bottom of the cell (the default)",
+        x += 18;
+        addRibbonButton(x, row1, 16, Component.literal("B"), "Bottom Align: text at the bottom of the cell (the default)",
                 () -> applyVerticalAlignment(3));
-        int row1End = x + 40;
+        int row1End = x + 16;
 
         x = start;
         addRibbonButton(x, row2, 16, Component.literal("L"), "Align left", () -> applyAlignment(1));
@@ -4788,9 +4788,9 @@ public class SpreadsheetScreen extends Screen {
                                 anchor[1]));
             }
             case ALIGNMENT -> List.of(
-                    List.of(MiniToolbar.Item.button("Top", 24, () -> applyVerticalAlignment(1)),
-                            MiniToolbar.Item.button("Middle", 36, () -> applyVerticalAlignment(2)),
-                            MiniToolbar.Item.button("Bottom", 38, () -> applyVerticalAlignment(3))),
+                    List.of(MiniToolbar.Item.button("T", 14, () -> applyVerticalAlignment(1)),
+                            MiniToolbar.Item.button("M", 14, () -> applyVerticalAlignment(2)),
+                            MiniToolbar.Item.button("B", 14, () -> applyVerticalAlignment(3))),
                     List.of(MiniToolbar.Item.button("L", 14, () -> applyAlignment(1)),
                             MiniToolbar.Item.button("C", 14, () -> applyAlignment(2)),
                             MiniToolbar.Item.button("R", 14, () -> applyAlignment(3))));
