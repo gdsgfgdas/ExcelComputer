@@ -98,6 +98,13 @@ public class SpreadsheetScreen extends Screen {
     // Largest range that Delete/Backspace will clear in one go.
     private static final long MAX_CLEAR_CELLS = 10_000;
 
+    // The last row and column of a worksheet (0-based), as in Excel.
+    private static final int LAST_ROW = 1_048_575;
+    private static final int LAST_COLUMN = 16_383;
+
+    // Two clicks on the same header edge within this time are a double-click (AutoFit).
+    private static final long DOUBLE_CLICK_MS = 400;
+
     // Largest area that copy/paste will handle in one go.
     private static final long MAX_PASTE_CELLS = 10_000;
 
@@ -155,6 +162,25 @@ public class SpreadsheetScreen extends Screen {
     private int resizingRow = -1;
     private double resizeStartMouse;
     private int resizeStartSize;
+    // The columns or rows that get the new size when the drag ends: all the
+    // selected ones if the dragged one is part of a whole-column/row
+    // selection, like Excel, otherwise just the dragged one.
+    private int resizeFirst;
+    private int resizeLast;
+    private int[] resizeStartSizes;
+
+    // The last click on a header edge, to spot a double-click (AutoFit).
+    private long lastEdgeClickTime;
+    private int lastEdgeClickColumn = -1;
+    private int lastEdgeClickRow = -1;
+
+    // Dragging across the column letters or row numbers selects whole columns or rows.
+    private boolean headerSelectingColumns;
+    private boolean headerSelectingRows;
+
+    // Ctrl+Space and Shift+Space are selection shortcuts; this keeps their
+    // space from also starting to type in the cell (the time it was pressed).
+    private long swallowSpaceUntil;
 
     // Formula "point mode": a cell reference was inserted into the edit box
     // by clicking/dragging cells. pointStart/pointEnd mark where in the text
@@ -206,6 +232,13 @@ public class SpreadsheetScreen extends Screen {
     // "pen" (line style and color) that presets draw with.
     private final BorderMenu borderMenu = new BorderMenu();
     private final FunctionMenu functionMenu = new FunctionMenu();
+    // The function list that pops up under the formula bar while a formula is typed.
+    private final FormulaAutocomplete autocomplete = new FormulaAutocomplete();
+    // Home > Conditional Formatting: the dropdown, and the window for a rule's
+    // value and look (null when closed) with the range it applies to.
+    private final ConditionalMenu conditionalMenu = new ConditionalMenu();
+    private ConditionalDialog conditionalDialog;
+    private int[] conditionalRange;
     private BorderMenu.Option lastBorder = BorderMenu.Option.BOTTOM;
     private int penStyle = CellFormat.LINE_THIN;
     private int penColor = -1;
@@ -254,7 +287,10 @@ public class SpreadsheetScreen extends Screen {
             boolean size,
             // A table or filter change (Table / Filter buttons): the sheet's
             // tables before and after it. Null for every other edit.
-            TableChange table
+            TableChange table,
+            // A conditional formatting change: the sheet's rules before and
+            // after it. Null for every other edit.
+            RuleChange rules
     ) {
         CellEdit(
                 int sheet,
@@ -264,7 +300,7 @@ public class SpreadsheetScreen extends Screen {
                 String newValue,
                 boolean chained
         ) {
-            this(sheet, row, column, previousValue, newValue, chained, -1, -1, false, null);
+            this(sheet, row, column, previousValue, newValue, chained, -1, -1, false, null, null);
         }
 
         CellEdit(
@@ -277,22 +313,39 @@ public class SpreadsheetScreen extends Screen {
                 int previousStyle,
                 int newStyle
         ) {
-            this(sheet, row, column, previousValue, newValue, chained, previousStyle, newStyle, false, null);
+            this(sheet, row, column, previousValue, newValue, chained, previousStyle, newStyle, false, null, null);
         }
 
         static CellEdit resize(int sheet, int row, int column, boolean chained, int previous, int updated) {
-            return new CellEdit(sheet, row, column, "", "", chained, previous, updated, true, null);
+            return new CellEdit(sheet, row, column, "", "", chained, previous, updated, true, null, null);
         }
 
         // row and column: the cell that undo/redo selects (the table's top-left corner).
         static CellEdit tableChange(int sheet, int row, int column, TableChange change) {
-            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, change);
+            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, change, null);
+        }
+
+        // row and column: the cell that undo/redo selects (the range's top-left corner).
+        static CellEdit ruleChange(int sheet, int row, int column, RuleChange change) {
+            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, null, change);
+        }
+
+        // What undo/redo reports, e.g. "Undid: adding a color scale".
+        String description() {
+            return table != null ? table.description() : rules != null ? rules.description() : null;
         }
     }
 
     private record TableChange(
             WorkbookManager.TableState before,
             WorkbookManager.TableState after,
+            String description
+    ) {
+    }
+
+    private record RuleChange(
+            ConditionalFormats.State before,
+            ConditionalFormats.State after,
             String description
     ) {
     }
@@ -537,10 +590,65 @@ public class SpreadsheetScreen extends Screen {
         rangeEndColumn = selectedColumn;
     }
 
+    // Whole columns (clicked on the column letters) or whole rows (row numbers).
+    private boolean wholeColumnsSelected() {
+        return rangeTop() == 0 && rangeBottom() == LAST_ROW;
+    }
+
+    private boolean wholeRowsSelected() {
+        return rangeLeft() == 0 && rangeRight() == LAST_COLUMN;
+    }
+
+    // The bottom and right of the selection for actions on cells (clear,
+    // copy, format, ...). Whole columns or rows stop at the last used row or
+    // column, like Excel, instead of touching a million empty cells.
+    private int actionBottom() {
+        if (manager == null || !wholeColumnsSelected()) {
+            return rangeBottom();
+        }
+
+        return Math.max(rangeTop(), Math.min(rangeBottom(), manager.getLastUsedRow(sheetIndex)));
+    }
+
+    private int actionRight() {
+        if (manager == null || !wholeRowsSelected()) {
+            return rangeRight();
+        }
+
+        return Math.max(rangeLeft(), Math.min(rangeRight(), manager.getLastUsedColumn(sheetIndex)));
+    }
+
+    // Selects whole columns, from the anchor column to the end column.
+    private void selectColumns(int anchor, int end) {
+        selectedRow = 0;
+        selectedColumn = anchor;
+        rangeEndRow = LAST_ROW;
+        rangeEndColumn = end;
+        refreshEditor();
+    }
+
+    // Selects whole rows, from the anchor row to the end row.
+    private void selectRows(int anchor, int end) {
+        selectedRow = anchor;
+        selectedColumn = 0;
+        rangeEndRow = end;
+        rangeEndColumn = LAST_COLUMN;
+        refreshEditor();
+    }
+
+    private void selectAll() {
+        selectedRow = 0;
+        selectedColumn = 0;
+        rangeEndRow = LAST_ROW;
+        rangeEndColumn = LAST_COLUMN;
+        refreshEditor();
+    }
+
     private static String cellRef(int row, int column) {
         return columnName(column) + (row + 1);
     }
 
+    // "B2", "B2:D5", or for whole columns "C:E" and whole rows "3:5", like Excel.
     private static String rangeRef(int row1, int column1, int row2, int column2) {
         int top = Math.min(row1, row2);
         int bottom = Math.max(row1, row2);
@@ -549,6 +657,14 @@ public class SpreadsheetScreen extends Screen {
 
         if (top == bottom && left == right) {
             return cellRef(top, left);
+        }
+
+        if (left == 0 && right == LAST_COLUMN) {
+            return (top + 1) + ":" + (bottom + 1);
+        }
+
+        if (top == 0 && bottom == LAST_ROW) {
+            return columnName(left) + ":" + columnName(right);
         }
 
         return cellRef(top, left) + ":" + cellRef(bottom, right);
@@ -717,7 +833,9 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
-        commitPendingEdit();
+        if (!commitPendingEdit()) {
+            return;
+        }
 
         sheetIndex = newSheetIndex;
         selectedRow = 0;
@@ -912,6 +1030,7 @@ public class SpreadsheetScreen extends Screen {
 
         boolean showPoint = pointing && cellEditor != null
                 && cellEditor.isFocused();
+        boolean editingCell = cellEditor != null && cellEditor.isFocused();
         int pointTop = Math.min(pointAnchorRow, pointEndRow);
         int pointBottom = Math.max(pointAnchorRow, pointEndRow);
         int pointLeft = Math.min(pointAnchorColumn, pointEndColumn);
@@ -930,10 +1049,30 @@ public class SpreadsheetScreen extends Screen {
 
         graphics.fill(GRID_X, GRID_Y, gridRight, GRID_Y + headerHeight, 0xFF3C4043);
 
+        // Headers of the selected columns and rows are shaded, with a green
+        // edge toward the grid; fully selected ones are filled green, like Excel.
+        boolean wholeColumns = rangeTop == 0 && rangeBottom == LAST_ROW;
+        boolean wholeRows = rangeLeft == 0 && rangeRight == LAST_COLUMN;
+
+        // The corner box selects everything; it has Excel's small triangle.
+        graphics.fill(10, GRID_Y, GRID_X, GRID_Y + headerHeight,
+                wholeColumns && wholeRows ? 0xFF1E6B41 : 0xFF3C4043);
+        int triangle = Math.max(2, Math.min(headerHeight, GRID_X - 10) / 2 - 2);
+
+        for (int line = 0; line < triangle; line++) {
+            graphics.fill(GRID_X - 3 - line, GRID_Y + headerHeight - 3 - triangle + line,
+                    GRID_X - 3, GRID_Y + headerHeight - 2 - triangle + line, 0xFF9AA0A6);
+        }
+
         int x = GRID_X;
         int cw = 0;
         for (int actualColumn = firstVisibleColumn; x < gridRight; actualColumn++, x += cw) {
             cw = columnWidth(actualColumn);
+
+            if (actualColumn >= rangeLeft && actualColumn <= rangeRight) {
+                graphics.fill(x, GRID_Y, x + cw, GRID_Y + headerHeight, wholeColumns ? 0xFF1E6B41 : 0xFF4A5057);
+                graphics.fill(x, GRID_Y + headerHeight - 2, x + cw, GRID_Y + headerHeight, 0xFF33A06A);
+            }
 
             drawHeaderLabel(
                     graphics, columnName(actualColumn),
@@ -958,7 +1097,14 @@ public class SpreadsheetScreen extends Screen {
                 continue; // hidden by a filter
             }
 
-            graphics.fill(10, y, GRID_X, y + ch, 0xFF3C4043);
+            boolean rowSelected = actualRow >= rangeTop && actualRow <= rangeBottom;
+            graphics.fill(10, y, GRID_X, y + ch,
+                    !rowSelected ? 0xFF3C4043 : wholeRows ? 0xFF1E6B41 : 0xFF4A5057);
+
+            if (rowSelected) {
+                graphics.fill(GRID_X - 2, y, GRID_X, y + ch, 0xFF33A06A);
+            }
+
             drawHeaderLabel(
                     graphics, Integer.toString(actualRow + 1),
                     10, y, GRID_X - 10, ch, 10
@@ -989,9 +1135,21 @@ public class SpreadsheetScreen extends Screen {
                                 ? 0xFF000000 | lighten(tableAccent(table.style()), 0.8)
                         : (actualRow + actualColumn) % 2 == 0 ? 0xFFFFFFFF : 0xFFF7F7F7;
 
+                // Conditional formatting goes over the cell's own look, like Excel.
+                ConditionalFormats.Style conditional = manager.getConditionalStyle(
+                        sheetIndex, actualRow, actualColumn);
+
+                if (conditional != null && conditional.fill() >= 0) {
+                    background = 0xFF000000 | conditional.fill();
+                }
+
                 graphics.fill(x, y, x + cw, y + ch, background);
                 graphics.fill(x, y, x + cw, y + 1, 0xFFD0D0D0);
                 graphics.fill(x, y, x + 1, y + ch, 0xFFD0D0D0);
+
+                if (conditional != null && conditional.bar() >= 0) {
+                    drawDataBar(graphics, x, y, cw, ch, conditional);
+                }
 
                 if (format.borders().any()) {
                     drawCellBorders(graphics, x, y, cw, ch, format.borders());
@@ -1100,11 +1258,14 @@ public class SpreadsheetScreen extends Screen {
                     }
                 }
 
-                String value = manager.getCellText(
-                        sheetIndex, actualRow, actualColumn
-                );
+                // The cell being edited shows what is typed (with a cursor), like Excel.
+                boolean editingHere = editingCell
+                        && actualRow == selectedRow && actualColumn == selectedColumn;
+                String value = editingHere
+                        ? cellEditor.getValue()
+                        : manager.getCellText(sheetIndex, actualRow, actualColumn);
 
-                if (value.isEmpty()) {
+                if (value.isEmpty() && !editingHere) {
                     continue;
                 }
 
@@ -1115,10 +1276,12 @@ public class SpreadsheetScreen extends Screen {
                 if (8f * scale > ch) {
                     continue;
                 }
+                boolean conditionalBold = conditional != null && Boolean.TRUE.equals(conditional.bold());
+                boolean conditionalItalic = conditional != null && Boolean.TRUE.equals(conditional.italic());
                 Component text = Component.literal(value).withStyle(
                         Style.EMPTY
-                                .withBold(format.bold() || tableHeader)
-                                .withItalic(format.italic())
+                                .withBold(format.bold() || tableHeader || conditionalBold)
+                                .withItalic(format.italic() || conditionalItalic)
                                 .withUnderlined(format.underline())
                 );
                 float textWidth = this.font.width(text) * scale;
@@ -1130,19 +1293,45 @@ public class SpreadsheetScreen extends Screen {
                 float textX = align == 2 ? (cw - textWidth) / 2f
                         : align == 3 ? cw - 4 - textWidth : 4;
                 textX = Math.max(4f, textX);
+                float caretX = 0;
+
+                if (editingHere) {
+                    // Typing is shown left-aligned, scrolled so the cursor stays in the cell.
+                    int caret = Math.max(0, Math.min(cellEditor.getCursorPosition(), value.length()));
+
+                    caretX = this.font.width(Component.literal(value.substring(0, caret)).withStyle(text.getStyle()));
+                    textX = Math.min(4f, cw - 5 - caretX * scale);
+                }
                 int textColor = 0xFF000000
-                        | (format.fontColor() >= 0 ? format.fontColor()
+                        | (conditional != null && conditional.fontColor() >= 0 ? conditional.fontColor()
+                        : format.fontColor() >= 0 ? format.fontColor()
                         : tableHeader ? 0xFFFFFF : 0x202124);
 
                 // Clip long text to the cell instead of cutting characters.
                 enableWindowScissor(graphics, x + 1, y + 1, x + cw - 1 - (hasArrow ? arrowWidth + 2 : 0), y + ch - 1);
+                // Vertical alignment: top, middle or bottom (Excel's default),
+                // a little way in from the edge when the row has the room.
+                float spare = ch - 8f * scale;
+                float edge = Math.min(2f, spare / 2f);
+                float textTop = format.vAlign() == 1 ? edge
+                        : format.vAlign() == 2 ? spare / 2f
+                        : spare - edge;
+
                 pushTextScale(
                         graphics,
                         snapToPixel(x + textX),
-                        snapToPixel(y + (ch - 8f * scale) / 2f),
+                        snapToPixel(y + textTop),
                         scale
                 );
                 graphics.drawString(this.font, text, 0, 0, textColor, false);
+
+                // A blinking cursor where the next character goes.
+                if (editingHere && System.currentTimeMillis() / 500 % 2 == 0) {
+                    int cursorX = Math.round(caretX);
+
+                    graphics.fill(cursorX, -1, cursorX + 1, 9, textColor);
+                }
+
                 popTextScale(graphics);
                 graphics.disableScissor();
             }
@@ -1195,6 +1384,29 @@ public class SpreadsheetScreen extends Screen {
 
         if (filterMenu.isOpen()) {
             filterMenu.scroll(scrollY);
+            return true;
+        }
+
+        if (conditionalDialog != null || conditionalMenu.isOpen()) {
+            return true;
+        }
+
+        if (autocomplete.isOpen() && autocomplete.contains(mouseX, mouseY)) {
+            autocomplete.scroll(scrollY);
+            return true;
+        }
+
+        // While typing, the wheel only scrolls the view, like Excel: the edit
+        // stays open on its cell, even when that cell scrolls out of sight.
+        if (cellEditor != null && cellEditor.isFocused()) {
+            if (scrollY != 0) {
+                firstVisibleRow = Math.max(0, firstVisibleRow + (scrollY > 0 ? -3 : 3));
+            }
+
+            if (scrollX != 0) {
+                firstVisibleColumn = Math.max(0, firstVisibleColumn + (scrollX > 0 ? -2 : 2));
+            }
+
             return true;
         }
 
@@ -1402,6 +1614,30 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // The conditional formatting rule window takes every key while it's open.
+        if (conditionalDialog != null) {
+            ConditionalDialog.Result result = conditionalDialog.keyPressed(key, ctrl,
+                    () -> this.minecraft.keyboardHandler.getClipboard());
+
+            if (result == ConditionalDialog.Result.OK) {
+                applyConditionalDialog();
+            } else if (result == ConditionalDialog.Result.CANCEL) {
+                conditionalDialog = null;
+            }
+
+            return true;
+        }
+
+        if (conditionalMenu.isOpen() && key == GLFW.GLFW_KEY_ESCAPE) {
+            conditionalMenu.close();
+            return true;
+        }
+
+        if (groupPanel != null && groupPanel.isOpen() && key == GLFW.GLFW_KEY_ESCAPE) {
+            groupPanel.close();
+            return true;
+        }
+
         if ((palette.isOpen() || formatMenu.isOpen() || filterMenu.isOpen() || borderMenu.isOpen()
                 || functionMenu.isOpen() || pasteMenu.isOpen() || cellMenu.isOpen() || miniToolbar.isOpen())
                 && key == GLFW.GLFW_KEY_ESCAPE) {
@@ -1429,7 +1665,9 @@ public class SpreadsheetScreen extends Screen {
                 && manager != null) {
 
             // Commit any pending edit first, so it can be undone too.
-            commitPendingEdit();
+            if (!commitPendingEdit()) {
+                return true;
+            }
 
             undoLastEdit();
             return true;
@@ -1438,7 +1676,10 @@ public class SpreadsheetScreen extends Screen {
         if (key == GLFW.GLFW_KEY_Y
                 && ctrl
                 && manager != null) {
-            commitPendingEdit();
+            if (!commitPendingEdit()) {
+                return true;
+            }
+
             redoLastEdit();
             return true;
         }
@@ -1471,6 +1712,26 @@ public class SpreadsheetScreen extends Screen {
                     toggleFlag(CellFormat.Kind.UNDERLINE, activeFormat().underline());
                     return true;
                 }
+                // Ctrl+A selects the whole sheet, Ctrl+Space the selected cells' whole columns.
+                if (key == GLFW.GLFW_KEY_A) {
+                    selectAll();
+                    status = "Selected the whole sheet";
+                    return true;
+                }
+                if (key == GLFW.GLFW_KEY_SPACE) {
+                    selectColumns(selectedColumn, rangeEndColumn);
+                    swallowSpaceUntil = System.currentTimeMillis() + 250;
+                    status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+                    return true;
+                }
+            }
+
+            // Shift+Space selects the selected cells' whole rows.
+            if (shift && !ctrl && key == GLFW.GLFW_KEY_SPACE && manager != null) {
+                selectRows(selectedRow, rangeEndRow);
+                swallowSpaceUntil = System.currentTimeMillis() + 250;
+                status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+                return true;
             }
 
             if ((key == GLFW.GLFW_KEY_BACKSPACE
@@ -1487,6 +1748,40 @@ public class SpreadsheetScreen extends Screen {
                 pointing = false;
             }
 
+            // The formula autocomplete list takes the arrow keys, Tab and Escape.
+            syncAutocomplete();
+
+            if (autocomplete.isOpen()) {
+                switch (key) {
+                    case GLFW.GLFW_KEY_UP -> {
+                        autocomplete.move(-1);
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_DOWN -> {
+                        autocomplete.move(1);
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_PAGE_UP -> {
+                        autocomplete.move(-7);
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_PAGE_DOWN -> {
+                        autocomplete.move(7);
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_TAB -> {
+                        acceptAutocomplete();
+                        return true;
+                    }
+                    case GLFW.GLFW_KEY_ESCAPE -> {
+                        autocomplete.dismiss(cellEditor.getValue(), cellEditor.getCursorPosition());
+                        return true;
+                    }
+                    default -> {
+                    }
+                }
+            }
+
             if (key == GLFW.GLFW_KEY_ESCAPE) {
                 leaveEditor();
                 refreshEditor();
@@ -1495,7 +1790,9 @@ public class SpreadsheetScreen extends Screen {
 
             if (key == GLFW.GLFW_KEY_ENTER
                     || key == GLFW.GLFW_KEY_KP_ENTER) {
-                commitPendingEdit();
+                if (!commitPendingEdit()) {
+                    return true;
+                }
 
                 // Ctrl+Enter keeps the same cell selected, like Excel.
                 if (!ctrl) {
@@ -1506,8 +1803,10 @@ public class SpreadsheetScreen extends Screen {
             }
 
             if (key == GLFW.GLFW_KEY_TAB) {
-                commitPendingEdit();
-                moveSelection(1, 0);
+                if (commitPendingEdit()) {
+                    moveSelection(1, 0);
+                }
+
                 return true;
             }
 
@@ -1576,9 +1875,9 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
 
         int top = rangeTop();
-        int bottom = rangeBottom();
+        int bottom = actionBottom();
         int left = rangeLeft();
-        int right = rangeRight();
+        int right = actionRight();
 
         long cellCount = (long) (bottom - top + 1) * (right - left + 1);
 
@@ -1816,9 +2115,9 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
 
         int top = rangeTop();
-        int bottom = rangeBottom();
+        int bottom = actionBottom();
         int left = rangeLeft();
-        int right = rangeRight();
+        int right = actionRight();
         int rows = bottom - top + 1;
         int columns = right - left + 1;
 
@@ -1968,8 +2267,8 @@ public class SpreadsheetScreen extends Screen {
         boolean fill = grid.length == 1 && grid[0].length == 1
                 && hasMultiSelection() && !cut;
 
-        int pasteRows = fill ? rangeBottom() - top + 1 : grid.length;
-        int pasteColumns = fill ? rangeRight() - left + 1 : grid[0].length;
+        int pasteRows = fill ? actionBottom() - top + 1 : grid.length;
+        int pasteColumns = fill ? actionRight() - left + 1 : grid[0].length;
 
         if ((long) pasteRows * pasteColumns > MAX_PASTE_CELLS) {
             status = "Paste area too large";
@@ -2257,8 +2556,8 @@ public class SpreadsheetScreen extends Screen {
         markDirty();
 
         selectAfterHistory(last);
-        status = last.table() != null
-                ? "Undid: " + last.table().description()
+        status = last.description() != null
+                ? "Undid: " + last.description()
                 : last.size()
                 ? "Undid size change"
                 : "Undid edit to " + cellRef(selectedRow, selectedColumn);
@@ -2315,8 +2614,8 @@ public class SpreadsheetScreen extends Screen {
         markDirty();
 
         selectAfterHistory(last);
-        status = last.table() != null
-                ? "Redid: " + last.table().description()
+        status = last.description() != null
+                ? "Redid: " + last.description()
                 : last.size()
                 ? "Redid size change"
                 : "Redid edit to " + cellRef(selectedRow, selectedColumn);
@@ -2326,6 +2625,11 @@ public class SpreadsheetScreen extends Screen {
     @Override
     public boolean charTyped(CharacterEvent characterEvent) {
         if (saving()) {
+            return true;
+        }
+
+        if (conditionalDialog != null) {
+            conditionalDialog.charTyped(characterEvent.codepoint());
             return true;
         }
 
@@ -2342,6 +2646,11 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        if (conditionalDialog != null) {
+            conditionalDialog.charTyped(chr);
+            return true;
+        }
+
         if (prepareTypedChar(chr)) {
             return cellEditor.charTyped(chr, modifiers);
         }
@@ -2354,6 +2663,12 @@ public class SpreadsheetScreen extends Screen {
     // (typing on a selected cell starts a replacement edit).
     private boolean prepareTypedChar(int typed) {
         if (manager == null || cellEditor == null) {
+            return false;
+        }
+
+        // The space from Ctrl+Space / Shift+Space only selects; it doesn't start typing.
+        if (typed == ' ' && System.currentTimeMillis() < swallowSpaceUntil) {
+            swallowSpaceUntil = 0;
             return false;
         }
 
@@ -2492,6 +2807,206 @@ public class SpreadsheetScreen extends Screen {
         return -1;
     }
 
+    // ----- whole columns and rows -----
+
+    private static final int HEADER_NONE = 0;
+    private static final int HEADER_COLUMN = 1;
+    private static final int HEADER_ROW = 2;
+    private static final int HEADER_CORNER = 3;
+
+    // Which header the mouse is over: the column letters, the row numbers,
+    // the corner box where they meet, or none. Edges count as headers too
+    // (resize grabs are checked before this).
+    private int headerAreaAt(double mouseX, double mouseY) {
+        boolean inColumnHeader = mouseY >= GRID_Y && mouseY < GRID_Y + headerHeight();
+        boolean inRowHeader = mouseX >= 10 && mouseX < GRID_X;
+
+        if (inColumnHeader && inRowHeader) {
+            return HEADER_CORNER;
+        }
+
+        if (inColumnHeader && mouseX >= GRID_X && mouseX < gridRight()) {
+            return HEADER_COLUMN;
+        }
+
+        if (inRowHeader && mouseY >= GRID_Y + headerHeight() && mouseY < gridBottom()) {
+            return HEADER_ROW;
+        }
+
+        return HEADER_NONE;
+    }
+
+    // Selecting everything and resizing would touch all 16,384 columns or
+    // 1,048,576 rows. A selection bigger than MAX_RESIZE_COUNT stops at the
+    // used or visible area, whichever is further, and never goes past
+    // MAX_RESIZE_TOTAL (the columns/rows beyond keep their size).
+    private static final int MAX_RESIZE_COUNT = 1_000;
+    private static final int MAX_RESIZE_TOTAL = 20_000;
+
+    // The columns a drag on this column's edge resizes: all selected columns
+    // if this one is part of a whole-column selection (like Excel), else just it.
+    private int[] columnsToResize(int column) {
+        if (!wholeColumnsSelected() || column < rangeLeft() || column > rangeRight()) {
+            return new int[] {column, column};
+        }
+
+        int last = rangeRight();
+
+        if (last - rangeLeft() + 1 > MAX_RESIZE_COUNT) {
+            int lastVisible = firstVisibleColumn + visibleColumns();
+            last = Math.min(last, Math.max(column, Math.max(manager.getLastUsedColumn(sheetIndex), lastVisible)));
+        }
+
+        return new int[] {rangeLeft(), Math.max(column, Math.min(last, rangeLeft() + MAX_RESIZE_TOTAL - 1))};
+    }
+
+    private int[] rowsToResize(int row) {
+        if (!wholeRowsSelected() || row < rangeTop() || row > rangeBottom()) {
+            return new int[] {row, row};
+        }
+
+        int last = rangeBottom();
+
+        if (last - rangeTop() + 1 > MAX_RESIZE_COUNT) {
+            int lastVisible = firstVisibleRow + visibleRows();
+            last = Math.min(last, Math.max(row, Math.max(manager.getLastUsedRow(sheetIndex), lastVisible)));
+        }
+
+        return new int[] {rangeTop(), Math.max(row, Math.min(last, rangeTop() + MAX_RESIZE_TOTAL - 1))};
+    }
+
+    // Sets a column's width or a row's height without touching the status line.
+    private void setSize(boolean column, int index, int pixels) {
+        if (column) {
+            manager.setColumnWidthPixels(sheetIndex, index, pixels);
+            columnWidthCache.put(sizeKey(sheetIndex, index), pixels);
+        } else {
+            manager.setRowHeightPixels(sheetIndex, index, pixels);
+            rowHeightCache.put(sizeKey(sheetIndex, index), pixels);
+        }
+    }
+
+    // The end of a header-edge drag: every column or row in the group gets
+    // the dragged one's new size, as one undo step.
+    private void finishResize() {
+        if (manager == null || resizeStartSizes == null) {
+            return;
+        }
+
+        boolean columns = resizingColumn >= 0;
+        int dragged = columns ? resizingColumn : resizingRow;
+        int size = columns ? baseColumnWidth(dragged) : baseRowHeight(dragged);
+
+        recordSizes(columns, resizeFirst, resizeLast, resizeStartSizes, index -> size);
+        resizeStartSizes = null;
+    }
+
+    // Gives each column/row in first..last its new size and records the
+    // changes as one undo step. Rows hidden by a filter are left alone.
+    private void recordSizes(boolean columns, int first, int last, int[] previous,
+                             java.util.function.IntUnaryOperator newSize) {
+        boolean chained = false;
+        int changed = 0;
+
+        try {
+            for (int index = first; index <= last; index++) {
+                int before = previous[index - first];
+
+                if (!columns && before == 0) {
+                    continue;
+                }
+
+                int after = columns
+                        ? Math.max(8, Math.min(1000, newSize.applyAsInt(index)))
+                        : Math.max(6, Math.min(500, newSize.applyAsInt(index)));
+
+                setSize(columns, index, after);
+
+                if (after != before) {
+                    undoHistory.push(columns
+                            ? CellEdit.resize(sheetIndex, -1, index, chained, before, after)
+                            : CellEdit.resize(sheetIndex, index, -1, chained, before, after));
+                    chained = true;
+                    changed++;
+                }
+            }
+        } catch (RuntimeException exception) {
+            status = "Could not resize: " + exception.getMessage();
+        }
+
+        if (changed > 0) {
+            redoHistory.clear();
+            markDirty();
+        }
+
+        if (first == last) {
+            status = columns
+                    ? "Column " + columnName(first) + " width: " + baseColumnWidth(first)
+                    : "Row " + (first + 1) + " height: " + baseRowHeight(first);
+        } else {
+            status = (columns ? "Columns " + columnName(first) + ":" + columnName(last) + " width: "
+                    + baseColumnWidth(first)
+                    : "Rows " + (first + 1) + ":" + (last + 1) + " height: " + baseRowHeight(first));
+        }
+    }
+
+    // Double-clicking a header edge: each column becomes as wide as its
+    // widest text, each row as tall as its largest text (an empty one goes
+    // back to the standard size), like Excel's AutoFit.
+    private void autoFit(boolean columns, int first, int last) {
+        int[] previous = new int[last - first + 1];
+
+        for (int index = first; index <= last; index++) {
+            previous[index - first] = columns ? baseColumnWidth(index) : baseRowHeight(index);
+        }
+
+        recordSizes(columns, first, last, previous,
+                index -> columns ? fittedColumnWidth(index) : fittedRowHeight(index));
+        status = "AutoFit " + status.substring(0, 1).toLowerCase(Locale.ROOT) + status.substring(1);
+    }
+
+    // Most cells AutoFit looks at in one column or row, so a huge sheet can't freeze the game.
+    private static final int AUTOFIT_SCAN_LIMIT = 20_000;
+
+    private int fittedColumnWidth(int column) {
+        int lastRow = Math.min(manager.getLastUsedRow(sheetIndex), AUTOFIT_SCAN_LIMIT);
+        int widest = -1;
+
+        for (int row = 0; row <= lastRow; row++) {
+            String text = manager.getCellText(sheetIndex, row, column);
+
+            if (text.isEmpty()) {
+                continue;
+            }
+
+            CellFormat format = manager.getCellFormat(sheetIndex, row, column);
+            Component styled = Component.literal(text).withStyle(Style.EMPTY
+                    .withBold(format.bold())
+                    .withItalic(format.italic()));
+            // The same size cells are drawn at, at 100% zoom, plus the 4-pixel padding on each side.
+            float scale = 0.75f * format.fontPoints() / 11f;
+            widest = Math.max(widest, (int) Math.ceil(this.font.width(styled) * scale) + 8);
+        }
+
+        return widest < 0 ? manager.getDefaultColumnWidthPixels(sheetIndex) : widest;
+    }
+
+    private int fittedRowHeight(int row) {
+        int lastColumn = Math.min(manager.getLastUsedColumn(sheetIndex), AUTOFIT_SCAN_LIMIT);
+        int largest = -1;
+
+        for (int column = 0; column <= lastColumn; column++) {
+            if (!manager.getCellText(sheetIndex, row, column).isEmpty()) {
+                largest = Math.max(largest, manager.getCellFormat(sheetIndex, row, column).fontPoints());
+            }
+        }
+
+        int standard = manager.getDefaultRowHeightPixels(sheetIndex);
+
+        // The same rule as when the font size is changed (see fitRowHeights).
+        return largest < 0 ? standard : Math.max(standard, (int) Math.ceil(largest * 1.82));
+    }
+
     private void applyColumnWidth(int column, int pixels) {
         int size = Math.max(8, Math.min(1000, pixels));
 
@@ -2592,6 +3107,51 @@ public class SpreadsheetScreen extends Screen {
         status = function.syntax();
     }
 
+    // ----- formula autocomplete -----
+
+    // Opens, updates or closes the autocomplete list to match the formula
+    // being typed, and places it under the function name in the formula bar.
+    private void syncAutocomplete() {
+        if (manager == null || manager.isCsv() || cellEditor == null || !cellEditor.isFocused()) {
+            autocomplete.close();
+            return;
+        }
+
+        String text = cellEditor.getValue();
+
+        autocomplete.update(text, cellEditor.getCursorPosition());
+
+        if (autocomplete.isOpen()) {
+            // Widgets are placed in screen coordinates; popups are drawn in window coordinates.
+            int editorLeft = cellEditor.getX() - windowX;
+            int nameX = editorLeft + 4 + this.font.width(text.substring(0, autocomplete.tokenStart()));
+            int x = Math.min(nameX, editorLeft + cellEditor.getWidth() - 20);
+
+            autocomplete.setPosition(x, FORMULA_PANEL_BOTTOM + 2, this.width);
+        }
+    }
+
+    // Tab (or a click) on the autocomplete list: insert the function.
+    private void acceptAutocomplete() {
+        FormulaAutocomplete.Accepted result = autocomplete.accept(cellEditor.getValue());
+
+        if (result == null) {
+            return;
+        }
+
+        pointing = false;
+        cellEditor.setValue(result.text());
+
+        //? if >=1.21 {
+        cellEditor.moveCursorTo(result.caret(), false);
+        //?} else {
+        /*cellEditor.setCursorPosition(result.caret());
+        cellEditor.setHighlightPos(result.caret());
+        *///?}
+
+        status = result.suggestion().syntax();
+    }
+
     private void applyPointReference() {
         String reference = rangeRef(
                 pointAnchorRow, pointAnchorColumn,
@@ -2651,6 +3211,79 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // The rule window is modal. Clicking a cell outside it puts that
+        // cell's reference in its value box, like Excel.
+        if (conditionalDialog != null) {
+            if (button == 0 && conditionalDialog.contains(mouseX, mouseY)) {
+                ConditionalDialog.Result result = conditionalDialog.click(mouseX, mouseY);
+
+                if (result == ConditionalDialog.Result.OK) {
+                    applyConditionalDialog();
+                } else if (result == ConditionalDialog.Result.CANCEL) {
+                    conditionalDialog = null;
+                }
+            } else if (button == 0 && insideGrid(mouseX, mouseY)) {
+                int column = Math.max(0, columnAt(mouseX));
+                int row = Math.max(0, rowAt(mouseY));
+
+                conditionalDialog.insertReference(
+                        new org.apache.poi.ss.util.CellReference(row, column, true, true).formatAsString());
+            }
+
+            return true;
+        }
+
+        // A collapsed ribbon group's dropdown. Like the right-click formatting
+        // bar it stays open, so several formats can be applied; a list opened
+        // from it (palette, borders, paste, number format) takes its place.
+        if (groupPanel != null && groupPanel.isOpen() && button == 0) {
+            MiniToolbar.Item item = groupPanel.itemAt(mouseX, mouseY);
+
+            if (item != null && item.action() != null) {
+                item.action().run();
+
+                if (palette.isOpen() || borderMenu.isOpen() || pasteMenu.isOpen()
+                        || formatMenu.isOpen() || conditionalMenu.isOpen()) {
+                    groupPanel.close();
+                }
+            } else if (!groupPanel.contains(mouseX, mouseY)) {
+                groupPanel.close();
+            }
+
+            return true;
+        }
+
+        // The Conditional Formatting dropdown.
+        if (conditionalMenu.isOpen() && button == 0) {
+            ConditionalMenu.Item item = conditionalMenu.itemAt(mouseX, mouseY);
+            boolean inside = conditionalMenu.contains(mouseX, mouseY);
+
+            if (item != null || !inside) {
+                conditionalMenu.close();
+            }
+
+            if (item != null) {
+                chooseConditionalItem(item);
+            }
+
+            return true;
+        }
+
+        // Clicking a function in the autocomplete list inserts it.
+        if (autocomplete.isOpen() && autocomplete.contains(mouseX, mouseY)) {
+            if (button == 0 && autocomplete.selectAt(mouseX, mouseY)) {
+                acceptAutocomplete();
+            }
+
+            return true;
+        }
+
+        // Clicking away enters the edit first. An unfinished formula can't be
+        // entered, so the click is ignored and the typing kept, like Excel.
+        if (clickLeavesEditor(mouseX, mouseY) && !commitPendingEdit()) {
+            return true;
+        }
+
         // The formatting bar above the right-click menu. Like Excel, using it
         // closes the menu but keeps the bar, so you can apply several formats.
         if (miniToolbar.isOpen() && button == 0 && miniToolbar.contains(mouseX, mouseY)) {
@@ -2685,17 +3318,37 @@ public class SpreadsheetScreen extends Screen {
 
         // Right-clicking a cell opens the right-click menu. A cell outside
         // the selection gets selected first, as in Excel.
-        if (button == 1 && manager != null && insideGrid(mouseX, mouseY)) {
-            int column = Math.max(0, columnAt(mouseX));
-            int row = Math.max(0, rowAt(mouseY));
+        // On a column letter or row number, the whole column or row is
+        // selected first (unless it is already part of the selection).
+        int rightClickHeader = button == 1 && manager != null ? headerAreaAt(mouseX, mouseY) : HEADER_NONE;
 
+        if (button == 1 && manager != null && (insideGrid(mouseX, mouseY) || rightClickHeader != HEADER_NONE)) {
             commitPendingEdit();
 
-            if (row < rangeTop() || row > rangeBottom() || column < rangeLeft() || column > rangeRight()) {
-                selectedRow = row;
-                selectedColumn = column;
-                collapseRange();
-                refreshEditor();
+            if (rightClickHeader == HEADER_CORNER) {
+                selectAll();
+            } else if (rightClickHeader == HEADER_COLUMN) {
+                int column = Math.max(0, columnAt(mouseX));
+
+                if (!wholeColumnsSelected() || column < rangeLeft() || column > rangeRight()) {
+                    selectColumns(column, column);
+                }
+            } else if (rightClickHeader == HEADER_ROW) {
+                int row = Math.max(0, rowAt(mouseY));
+
+                if (!wholeRowsSelected() || row < rangeTop() || row > rangeBottom()) {
+                    selectRows(row, row);
+                }
+            } else {
+                int column = Math.max(0, columnAt(mouseX));
+                int row = Math.max(0, rowAt(mouseY));
+
+                if (row < rangeTop() || row > rangeBottom() || column < rangeLeft() || column > rangeRight()) {
+                    selectedRow = row;
+                    selectedColumn = column;
+                    collapseRange();
+                    refreshEditor();
+                }
             }
 
             closePopups();
@@ -2851,14 +3504,80 @@ public class SpreadsheetScreen extends Screen {
             if (resizeColumn >= 0 || resizeRow >= 0) {
                 commitPendingEdit();
 
+                boolean columns = resizeColumn >= 0;
+                int dragged = columns ? resizeColumn : resizeRow;
+                int[] group = columns ? columnsToResize(dragged) : rowsToResize(dragged);
+
+                // A second click on the same edge soon after: AutoFit, like Excel.
+                long now = System.currentTimeMillis();
+                boolean doubleClick = now - lastEdgeClickTime <= DOUBLE_CLICK_MS
+                        && resizeColumn == lastEdgeClickColumn && resizeRow == lastEdgeClickRow;
+                lastEdgeClickTime = doubleClick ? 0 : now;
+                lastEdgeClickColumn = resizeColumn;
+                lastEdgeClickRow = resizeRow;
+
+                if (doubleClick) {
+                    autoFit(columns, group[0], group[1]);
+                    return true;
+                }
+
                 resizingColumn = resizeColumn;
                 resizingRow = resizeRow;
-                resizeStartMouse = resizeColumn >= 0 ? mouseX : mouseY;
-                resizeStartSize = resizeColumn >= 0
-                        ? baseColumnWidth(resizeColumn)
-                        : baseRowHeight(resizeRow);
+                resizeStartMouse = columns ? mouseX : mouseY;
+                resizeStartSize = columns ? baseColumnWidth(dragged) : baseRowHeight(dragged);
+                resizeFirst = group[0];
+                resizeLast = group[1];
+                resizeStartSizes = new int[resizeLast - resizeFirst + 1];
+
+                for (int i = resizeFirst; i <= resizeLast; i++) {
+                    resizeStartSizes[i - resizeFirst] = columns ? baseColumnWidth(i) : baseRowHeight(i);
+                }
+
                 return true;
             }
+        }
+
+        // The column letters, row numbers and the corner box select whole
+        // columns, whole rows or the whole sheet. Drag to select several,
+        // Shift+click to extend. While typing a formula they insert a
+        // reference instead (C:C, 3:3), like Excel.
+        int header = button == 0 && manager != null ? headerAreaAt(mouseX, mouseY) : HEADER_NONE;
+
+        if (header != HEADER_NONE) {
+            int column = header == HEADER_COLUMN ? Math.max(0, columnAt(mouseX)) : 0;
+            int row = header == HEADER_ROW ? Math.max(0, rowAt(mouseY)) : 0;
+
+            if (canInsertReference()) {
+                if (!pointing) {
+                    pointing = true;
+                    pointStart = Math.min(cellEditor.getCursorPosition(), cellEditor.getValue().length());
+                    pointEnd = pointStart;
+                }
+
+                pointAnchorRow = header == HEADER_ROW ? row : 0;
+                pointEndRow = header == HEADER_ROW ? row : LAST_ROW;
+                pointAnchorColumn = header == HEADER_COLUMN ? column : 0;
+                pointEndColumn = header == HEADER_COLUMN ? column : LAST_COLUMN;
+                applyPointReference();
+                headerSelectingColumns = header == HEADER_COLUMN;
+                headerSelectingRows = header == HEADER_ROW;
+                return true;
+            }
+
+            commitPendingEdit();
+
+            if (header == HEADER_CORNER) {
+                selectAll();
+            } else if (header == HEADER_COLUMN) {
+                selectColumns(shift ? selectedColumn : column, column);
+                headerSelectingColumns = true;
+            } else {
+                selectRows(shift ? selectedRow : row, row);
+                headerSelectingRows = true;
+            }
+
+            status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+            return true;
         }
 
         // Clicks on the grid are handled here, before the widgets.
@@ -2959,6 +3678,35 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // Dragging across the column letters or row numbers.
+        if (headerSelectingColumns && manager != null) {
+            int column = Math.max(0, dragColumn(mouseX));
+
+            if (pointing) {
+                pointEndColumn = column;
+                applyPointReference();
+            } else {
+                rangeEndColumn = column;
+                status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+            }
+
+            return true;
+        }
+
+        if (headerSelectingRows && manager != null) {
+            int row = Math.max(0, dragRow(mouseY));
+
+            if (pointing) {
+                pointEndRow = row;
+                applyPointReference();
+            } else {
+                rangeEndRow = row;
+                status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+            }
+
+            return true;
+        }
+
         if (panning && manager != null) {
             firstVisibleColumn = Math.max(0, panStartColumn
                     + (int) Math.round((panStartX - mouseX) / cellWidth()));
@@ -3013,8 +3761,15 @@ public class SpreadsheetScreen extends Screen {
         }
 
         if (button == 0 && (resizingColumn >= 0 || resizingRow >= 0)) {
+            finishResize();
             resizingColumn = -1;
             resizingRow = -1;
+            return true;
+        }
+
+        if (button == 0 && (headerSelectingColumns || headerSelectingRows)) {
+            headerSelectingColumns = false;
+            headerSelectingRows = false;
             return true;
         }
 
@@ -3076,21 +3831,56 @@ public class SpreadsheetScreen extends Screen {
         }
 
         pointing = false;
+        autocomplete.close();
         this.setFocused(null);
     }
 
-    private void commitPendingEdit() {
+    // Enters the text being typed into the cell and leaves the editor.
+    // Returns false (and stays in the editor, keeping the text) when it
+    // can't be entered, e.g. an unfinished formula like "=A1+", so the
+    // caller should stop instead of throwing the typing away.
+    private boolean commitPendingEdit() {
         if (manager != null && cellEditor != null
-                && cellEditor.isFocused()) {
-            applyCellEdit();
+                && cellEditor.isFocused()
+                && !applyCellEdit()) {
+            return false;
         }
 
         leaveEditor();
+        return true;
     }
 
-    private void applyCellEdit() {
+    // True when a click would end the edit in progress: anywhere except the
+    // edit box itself and the clicks that add to the formula being typed.
+    private boolean clickLeavesEditor(double mouseX, double mouseY) {
+        if (manager == null || cellEditor == null || !cellEditor.isFocused()) {
+            return false;
+        }
+
+        int editorLeft = cellEditor.getX() - windowX;
+        int editorTop = cellEditor.getY() - windowY;
+
+        if (mouseX >= editorLeft && mouseX < editorLeft + cellEditor.getWidth()
+                && mouseY >= editorTop && mouseY < editorTop + cellEditor.getHeight()) {
+            return false;
+        }
+
+        // The Insert Function list and the fx button add a function to the formula.
+        if (functionMenu.isOpen()
+                || (mouseX >= FX_X && mouseX < FX_X + FX_WIDTH
+                && mouseY >= FORMULA_Y && mouseY < FORMULA_Y + BUTTON_HEIGHT)) {
+            return false;
+        }
+
+        // Clicking cells or headers inserts references into the formula.
+        return !(canInsertReference()
+                && (insideGrid(mouseX, mouseY) || headerAreaAt(mouseX, mouseY) != HEADER_NONE));
+    }
+
+    // Returns false when the cell couldn't be changed (the editor keeps the text).
+    private boolean applyCellEdit() {
         if (manager == null || cellEditor == null) {
-            return;
+            return true;
         }
 
         String previousValue = manager.getCellInput(
@@ -3106,7 +3896,7 @@ public class SpreadsheetScreen extends Screen {
         }
 
         if (previousValue.equals(newValue)) {
-            return;
+            return true;
         }
 
         CellEdit edit = new CellEdit(
@@ -3143,9 +3933,19 @@ public class SpreadsheetScreen extends Screen {
             status = "Updated "
                     + cellRef(selectedRow, selectedColumn);
 
+            // An unfinished or mistyped formula is entered too, showing an error like #NAME?.
+            String shown = manager.getCellText(sheetIndex, selectedRow, selectedColumn);
+
+            if (newValue.trim().startsWith("=") && shown.startsWith("#")) {
+                status += " (the formula gives " + shown + ")";
+            }
+
+            return true;
+
         } catch (RuntimeException exception) {
-            status = "Could not update cell: "
-                    + exception.getMessage();
+            // Keep editing so nothing typed is lost (Esc cancels).
+            status = "Could not update cell: " + exception.getMessage();
+            return false;
         }
     }
 
@@ -3158,7 +3958,9 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
-        commitPendingEdit();
+        if (!commitPendingEdit()) {
+            return;
+        }
 
         WorkbookManager workbook = manager;
         Path path = workbookPath;
@@ -3218,7 +4020,10 @@ public class SpreadsheetScreen extends Screen {
 
     // Warns once about unsaved changes before leaving the workbook.
     private void requestExit() {
-        commitPendingEdit();
+        if (!commitPendingEdit()) {
+            return;
+        }
+
 
         if (dirty && !discardArmed) {
             discardArmed = true;
@@ -3230,7 +4035,10 @@ public class SpreadsheetScreen extends Screen {
     }
 
     private void returnToPicker() {
-        commitPendingEdit();
+        if (!commitPendingEdit()) {
+            return;
+        }
+
         closeWorkbook();
         this.minecraft.setScreen(new WorkbookPickerScreen());
     }
@@ -3273,14 +4081,18 @@ public class SpreadsheetScreen extends Screen {
             String tip,
             Runnable action
     ) {
-        widestRibbon = Math.max(widestRibbon, x + width);
+        Button button = Button.builder(label, pressed -> action.run())
+                .bounds(x, y, width, BUTTON_HEIGHT)
+                .tooltip(Tooltip.create(Component.literal(tip)))
+                .build();
 
-        return this.addRenderableWidget(
-                Button.builder(label, button -> action.run())
-                        .bounds(x, y, width, BUTTON_HEIGHT)
-                        .tooltip(Tooltip.create(Component.literal(tip)))
-                        .build()
-        );
+        // Measuring the Home groups (see addHomeButtons): nothing is added.
+        if (measuringRibbon) {
+            return button;
+        }
+
+        widestRibbon = Math.max(widestRibbon, x + width);
+        return this.addRenderableWidget(button);
     }
 
     // ----- sheet bar (Excel's strip under the grid) -----
@@ -3589,7 +4401,10 @@ public class SpreadsheetScreen extends Screen {
         }
 
         // Rebuilding the widgets resets the edit box, so keep any typing first.
-        commitPendingEdit();
+        if (!commitPendingEdit()) {
+            return;
+        }
+
         palette.close();
         formatMenu.close();
         pasteMenu.close();
@@ -3611,7 +4426,10 @@ public class SpreadsheetScreen extends Screen {
     private int endGroup(String label, int left, int right) {
         int labelWidth = this.font.width(label);
         right = Math.max(right, left + labelWidth);
-        ribbonGroups.add(new RibbonGroup(label, left, right));
+
+        if (!measuringRibbon) {
+            ribbonGroups.add(new RibbonGroup(label, left, right));
+        }
 
         return right + GROUP_PAD * 2 + 1;
     }
@@ -3647,13 +4465,105 @@ public class SpreadsheetScreen extends Screen {
         endGroup("Tables", start, x);
     }
 
-    // Laid out like Excel's Home tab: Clipboard | Font | Alignment | Number | Editing.
+    // The Home tab's groups, left to right, like Excel's.
+    private enum HomeGroup {
+        CLIPBOARD("Clipboard"),
+        FONT("Font"),
+        ALIGNMENT("Alignment"),
+        NUMBER("Number"),
+        STYLES("Styles"),
+        EDITING("Editing");
+
+        private final String label;
+
+        HomeGroup(String label) {
+            this.label = label;
+        }
+    }
+
+    // While true, addRibbonButton and endGroup only measure (nothing is added).
+    private boolean measuringRibbon;
+    // Home groups shown as one dropdown button because the ribbon doesn't fit.
+    private final java.util.EnumSet<HomeGroup> collapsedGroups = java.util.EnumSet.noneOf(HomeGroup.class);
+    // The open dropdown of a collapsed group, and which group it is (null when none).
+    private MiniToolbar groupPanel;
+    private HomeGroup openGroup;
+
+    // Laid out like Excel's Home tab: Clipboard | Font | Alignment | Number | Styles | Editing.
+    // When the window is too narrow for everything, groups collapse from the
+    // right into one button each (like Excel), which opens their controls as
+    // a dropdown. A group only collapses if that actually saves room.
     private void addHomeButtons() {
+        HomeGroup[] groups = HomeGroup.values();
+        int[] full = new int[groups.length];
+        int[] small = new int[groups.length];
+
+        measuringRibbon = true;
+        try {
+            for (int i = 0; i < groups.length; i++) {
+                full[i] = layoutHomeGroup(groups[i], 0, false);
+                small[i] = layoutHomeGroup(groups[i], 0, true);
+            }
+        } finally {
+            measuringRibbon = false;
+        }
+
+        // The right edge of the last group, and the room for it (the same
+        // 14 pixel margin init keeps on the right).
+        int total = 14 - (GROUP_PAD * 2 + 1);
+
+        for (int width : full) {
+            total += width;
+        }
+
+        int available = this.width - 14;
+
+        // A window (not full screen) first grows to fit the whole ribbon (see
+        // init); groups only collapse when the screen itself is too narrow.
+        widestRibbon = Math.max(widestRibbon, total);
+
+        collapsedGroups.clear();
+
+        for (int i = groups.length - 1; i >= 0 && total > available; i--) {
+            if (small[i] < full[i]) {
+                collapsedGroups.add(groups[i]);
+                total -= full[i] - small[i];
+            }
+        }
+
+        int start = 14;
+
+        for (HomeGroup group : groups) {
+            start = layoutHomeGroup(group, start, collapsedGroups.contains(group));
+        }
+    }
+
+    // Lays out one group from start; returns where the next group starts.
+    private int layoutHomeGroup(HomeGroup group, int start, boolean collapsed) {
+        if (collapsed) {
+            String label = group.label + " v";
+            int width = this.font.width(label) + 10;
+            final int anchorX = start;
+
+            addRibbonButton(start, RIBBON_ROW1_Y, width, Component.literal(label),
+                    group.label + " (the window is too narrow to show these buttons)",
+                    () -> toggleGroupPanel(group, anchorX));
+            return endGroup(group.label, start, start + width);
+        }
+
+        return switch (group) {
+            case CLIPBOARD -> layoutClipboard(start);
+            case FONT -> layoutFont(start);
+            case ALIGNMENT -> layoutAlignment(start);
+            case NUMBER -> layoutNumber(start);
+            case STYLES -> layoutStyles(start);
+            case EDITING -> layoutEditing(start);
+        };
+    }
+
+    private int layoutClipboard(int start) {
         int row1 = RIBBON_ROW1_Y;
         int row2 = RIBBON_ROW2_Y;
-
-        // ----- Clipboard -----
-        int start = 14;
         int x = start;
 
         // Paste: the button pastes everything, the arrow opens the other paste types.
@@ -3668,11 +4578,15 @@ public class SpreadsheetScreen extends Screen {
                 () -> copySelection(true));
         addRibbonButton(x + 33, row2, 36, Component.literal("Copy"), "Copy (Ctrl+C)",
                 () -> copySelection(false));
-        start = endGroup("Clipboard", start, x + 69);
+        return endGroup("Clipboard", start, x + 69);
+    }
 
-        // ----- Font -----
+    private int layoutFont(int start) {
+        int row1 = RIBBON_ROW1_Y;
+        int row2 = RIBBON_ROW2_Y;
+
         // Row 1: font size.
-        x = start;
+        int x = start;
         addRibbonButton(x, row1, 14, Component.literal("-"), "Smaller text", () -> changeFontSize(-1));
         x += 14 + 4;
         sizeLabelX = x;
@@ -3697,8 +4611,11 @@ public class SpreadsheetScreen extends Screen {
 
         // Borders: the button repeats the last preset, the arrow opens the list.
         borderButtonX = x;
-        borderButton = addRibbonButton(x, row2, 42, Component.literal("Borders"),
+        Button borders = addRibbonButton(x, row2, 42, Component.literal("Borders"),
                 borderTip(), () -> applyBorder(lastBorder));
+        if (!measuringRibbon) {
+            borderButton = borders;
+        }
         x += 42;
         final int borderMenuX = borderButtonX;
         addRibbonButton(x, row2, 12, Component.literal("v"), "More borders, line color and line style",
@@ -3725,9 +4642,25 @@ public class SpreadsheetScreen extends Screen {
                 () -> togglePalette(ColorPalette.Target.TEXT, textPaletteX));
         x += 12;
 
-        start = endGroup("Font", start, Math.max(fontRow1End, x));
+        return endGroup("Font", start, Math.max(fontRow1End, x));
+    }
 
-        // ----- Alignment -----
+    // Like Excel: vertical alignment on the top row, horizontal below it.
+    private int layoutAlignment(int start) {
+        int row1 = RIBBON_ROW1_Y;
+        int row2 = RIBBON_ROW2_Y;
+        int x = start;
+
+        addRibbonButton(x, row1, 26, Component.literal("Top"), "Top Align: text at the top of the cell",
+                () -> applyVerticalAlignment(1));
+        x += 28;
+        addRibbonButton(x, row1, 38, Component.literal("Middle"), "Middle Align: text centered between top and bottom",
+                () -> applyVerticalAlignment(2));
+        x += 40;
+        addRibbonButton(x, row1, 40, Component.literal("Bottom"), "Bottom Align: text at the bottom of the cell (the default)",
+                () -> applyVerticalAlignment(3));
+        int row1End = x + 40;
+
         x = start;
         addRibbonButton(x, row2, 16, Component.literal("L"), "Align left", () -> applyAlignment(1));
         x += 18;
@@ -3735,9 +4668,13 @@ public class SpreadsheetScreen extends Screen {
         x += 18;
         addRibbonButton(x, row2, 16, Component.literal("R"), "Align right", () -> applyAlignment(3));
         x += 16;
-        start = endGroup("Alignment", start, x);
+        return endGroup("Alignment", start, Math.max(row1End, x));
+    }
 
-        // ----- Number -----
+    private int layoutNumber(int start) {
+        int row1 = RIBBON_ROW1_Y;
+        int row2 = RIBBON_ROW2_Y;
+
         // Row 1: the number format dropdown. Row 2: quick formats and decimals.
         formatButtonX = start;
         final int menuX = start;
@@ -3745,7 +4682,7 @@ public class SpreadsheetScreen extends Screen {
                 "Number format",
                 () -> toggleFormatMenu(menuX));
 
-        x = start;
+        int x = start;
         addRibbonButton(x, row2, 18, Component.literal("$"), "Currency format",
                 () -> applyNumberFormat("\"$\"#,##0.00"));
         x += 20;
@@ -3761,13 +4698,129 @@ public class SpreadsheetScreen extends Screen {
         addRibbonButton(x, row2, 24, Component.literal("-.0"), "Fewer decimal places",
                 () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, -1)));
         x += 24;
-        start = endGroup("Number", start, Math.max(start + 104, x));
+        return endGroup("Number", start, Math.max(start + 104, x));
+    }
 
-        // ----- Editing -----
-        addRibbonButton(start, row1, 40, Component.literal("Clear"),
+    private int layoutStyles(int start) {
+        final int conditionalMenuX = start;
+
+        addRibbonButton(start, RIBBON_ROW1_Y, 74, Component.literal("Conditional v"),
+                "Conditional Formatting: color cells by their values (highlight rules, data bars, color scales)",
+                () -> toggleConditionalMenu(conditionalMenuX));
+        return endGroup("Styles", start, start + 74);
+    }
+
+    private int layoutEditing(int start) {
+        addRibbonButton(start, RIBBON_ROW1_Y, 40, Component.literal("Clear"),
                 "Clear formatting",
                 () -> applyFormat(new CellFormat.Change(CellFormat.Kind.RESET, 0)));
-        endGroup("Editing", start, start + 40);
+        return endGroup("Editing", start, start + 40);
+    }
+
+    // ----- collapsed group dropdowns -----
+
+    private void toggleGroupPanel(HomeGroup group, int anchorX) {
+        boolean wasOpen = groupPanel != null && groupPanel.isOpen() && openGroup == group;
+
+        closePopups();
+
+        if (!wasOpen) {
+            openGroup = group;
+            groupPanel = buildGroupPanel(group);
+            groupPanel.open(Math.max(4, Math.min(anchorX, this.width - groupPanel.width() - 4)),
+                    RIBBON_ROW1_Y + BUTTON_HEIGHT + 2);
+        }
+    }
+
+    // Where a dropdown from a group's panel opens: under the panel.
+    private int belowGroupPanel(int popupHeight) {
+        return popupY(groupPanel.y() + groupPanel.height() + 2, popupHeight);
+    }
+
+    // The same controls as the expanded group, in the same rows. A list
+    // opened from it (palette, borders, paste, number format) replaces it
+    // (see handleMouseClicked).
+    private MiniToolbar buildGroupPanel(HomeGroup group) {
+        MiniToolbar.Item[] anchor = new MiniToolbar.Item[3];
+        MiniToolbar[] panel = new MiniToolbar[1];
+
+        List<List<MiniToolbar.Item>> rows = switch (group) {
+            case CLIPBOARD -> {
+                anchor[0] = MiniToolbar.Item.button("v", 10, () ->
+                        pasteMenu.open(panel[0].itemX(anchor[0]) - 42, belowGroupPanel(PasteMenu.HEIGHT), this.width));
+                yield List.of(
+                        List.of(MiniToolbar.Item.button("Paste", 40, () -> pasteClipboard(PasteMenu.Mode.ALL)),
+                                anchor[0]),
+                        List.of(MiniToolbar.Item.button("Cut", 24, () -> copySelection(true)),
+                                MiniToolbar.Item.button("Copy", 28, () -> copySelection(false))));
+            }
+            case FONT -> {
+                anchor[0] = MiniToolbar.Item.button("v", 10, () ->
+                        palette.open(ColorPalette.Target.FILL, panel[0].itemX(anchor[0]) - 24,
+                                belowGroupPanel(ColorPalette.HEIGHT), this.width));
+                anchor[1] = MiniToolbar.Item.button("v", 10, () ->
+                        palette.open(ColorPalette.Target.TEXT, panel[0].itemX(anchor[1]) - 16,
+                                belowGroupPanel(ColorPalette.HEIGHT), this.width));
+                anchor[2] = MiniToolbar.Item.button("v", 10, () ->
+                        borderMenu.open(panel[0].itemX(anchor[2]) - 40,
+                                belowGroupPanel(BorderMenu.HEIGHT), this.width));
+                yield List.of(
+                        List.of(MiniToolbar.Item.button("-", 14, () -> changeFontSize(-1)),
+                                new MiniToolbar.Item(() -> Component.literal(
+                                        manager == null ? "" : Integer.toString(activeFormat().fontPoints())),
+                                        16, null, null),
+                                MiniToolbar.Item.button("+", 14, () -> changeFontSize(1))),
+                        List.of(MiniToolbar.Item.button(Component.literal("B").withStyle(ChatFormatting.BOLD), 14,
+                                        () -> toggleFlag(CellFormat.Kind.BOLD, activeFormat().bold())),
+                                MiniToolbar.Item.button(Component.literal("I").withStyle(ChatFormatting.ITALIC), 14,
+                                        () -> toggleFlag(CellFormat.Kind.ITALIC, activeFormat().italic())),
+                                MiniToolbar.Item.button(Component.literal("U").withStyle(ChatFormatting.UNDERLINE), 14,
+                                        () -> toggleFlag(CellFormat.Kind.UNDERLINE, activeFormat().underline())),
+                                MiniToolbar.Item.button("Borders", 40, () -> applyBorder(lastBorder)),
+                                anchor[2],
+                                new MiniToolbar.Item(() -> Component.literal("Fill"), 24,
+                                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.FILL, lastFillColor)),
+                                        () -> lastFillColor),
+                                anchor[0],
+                                new MiniToolbar.Item(() -> Component.literal("A"), 16,
+                                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.FONT_COLOR, lastTextColor)),
+                                        () -> lastTextColor),
+                                anchor[1]));
+            }
+            case ALIGNMENT -> List.of(
+                    List.of(MiniToolbar.Item.button("Top", 24, () -> applyVerticalAlignment(1)),
+                            MiniToolbar.Item.button("Middle", 36, () -> applyVerticalAlignment(2)),
+                            MiniToolbar.Item.button("Bottom", 38, () -> applyVerticalAlignment(3))),
+                    List.of(MiniToolbar.Item.button("L", 14, () -> applyAlignment(1)),
+                            MiniToolbar.Item.button("C", 14, () -> applyAlignment(2)),
+                            MiniToolbar.Item.button("R", 14, () -> applyAlignment(3))));
+            case NUMBER -> {
+                anchor[0] = new MiniToolbar.Item(
+                        () -> Component.literal(manager == null ? "" : FormatMenu.nameOf(activeFormat().numberFormat()) + " v"),
+                        100, () -> formatMenu.open(panel[0].itemX(anchor[0]),
+                                belowGroupPanel(FormatMenu.HEIGHT), this.width), null);
+                yield List.of(
+                        List.of(anchor[0]),
+                        List.of(MiniToolbar.Item.button("$", 16, () -> applyNumberFormat("\"$\"#,##0.00")),
+                                MiniToolbar.Item.button("%", 16, () -> applyNumberFormat("0%")),
+                                MiniToolbar.Item.button(",", 16, () -> applyNumberFormat("#,##0.00")),
+                                MiniToolbar.Item.button("+.0", 22,
+                                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, 1))),
+                                MiniToolbar.Item.button("-.0", 22,
+                                        () -> applyFormat(new CellFormat.Change(CellFormat.Kind.DECIMALS, -1)))));
+            }
+            case STYLES -> {
+                anchor[0] = MiniToolbar.Item.button("Conditional v", 74, () ->
+                        conditionalMenu.open(panel[0].itemX(anchor[0]),
+                                belowGroupPanel(ConditionalMenu.HEIGHT), this.width));
+                yield List.of(List.of(anchor[0]));
+            }
+            case EDITING -> List.of(List.of(MiniToolbar.Item.button("Clear", 30,
+                    () -> applyFormat(new CellFormat.Change(CellFormat.Kind.RESET, 0)))));
+        };
+
+        panel[0] = new MiniToolbar(rows);
+        return panel[0];
     }
 
     private String borderTip() {
@@ -3796,9 +4849,9 @@ public class SpreadsheetScreen extends Screen {
         }
 
         int top = rangeTop();
-        int bottom = rangeBottom();
+        int bottom = actionBottom();
         int left = rangeLeft();
-        int right = rangeRight();
+        int right = actionRight();
 
         applyFormat((row, column) -> option.changeFor(
                 row, column, top, bottom, left, right, penStyle, penColor
@@ -3831,7 +4884,124 @@ public class SpreadsheetScreen extends Screen {
         }
     }
 
+    // ----- conditional formatting -----
+
+    private void toggleConditionalMenu(int anchorX) {
+        boolean wasOpen = conditionalMenu.isOpen();
+
+        closePopups();
+
+        if (!wasOpen) {
+            conditionalMenu.open(anchorX, RIBBON_ROW1_Y + BUTTON_HEIGHT + 2, this.width);
+        }
+    }
+
+    // The selected range for a rule: whole rows or columns stop at the last
+    // used cell, so rules don't scan a million empty rows.
+    private int[] conditionalArea() {
+        return new int[]{rangeTop(), rangeLeft(), actionBottom(), actionRight()};
+    }
+
+    private void chooseConditionalItem(ConditionalMenu.Item item) {
+        if (manager == null || !commitPendingEdit()) {
+            return;
+        }
+
+        if (manager.isCsv()) {
+            status = "Conditional formatting needs an .xlsx workbook";
+            return;
+        }
+
+        int[] area = conditionalArea();
+        String where = rangeRef(area[0], area[1], area[2], area[3]);
+
+        if (item.condition() != null) {
+            // Highlight and Top/Bottom rules ask for a value and a look first.
+            conditionalRange = area;
+            conditionalDialog = new ConditionalDialog(item.condition(), where);
+            return;
+        }
+
+        if (item.dataBar() != null) {
+            changeRules("adding a data bar to " + where,
+                    () -> manager.addDataBar(sheetIndex, area[0], area[1], area[2], area[3], item.dataBar()));
+        } else if (item.colorScale() != null) {
+            changeRules("adding a color scale to " + where,
+                    () -> manager.addColorScale(sheetIndex, area[0], area[1], area[2], area[3], item.colorScale()));
+        } else if (item.clear() == ConditionalMenu.Clear.SELECTION) {
+            // Clearing uses the whole selection, so whole-column rules are cleared too.
+            int[] whole = {rangeTop(), rangeLeft(), rangeBottom(), rangeRight()};
+            boolean[] changed = new boolean[1];
+
+            changeRules("clearing rules from " + where, () -> changed[0] = manager.clearConditionalRules(
+                    sheetIndex, whole[0], whole[1], whole[2], whole[3]));
+
+            if (!changed[0]) {
+                status = "No conditional formatting in " + where;
+            }
+        } else if (item.clear() == ConditionalMenu.Clear.SHEET) {
+            boolean[] changed = new boolean[1];
+
+            changeRules("clearing the sheet's rules", () -> changed[0] = manager.clearAllConditionalRules(sheetIndex));
+
+            if (!changed[0]) {
+                status = "This sheet has no conditional formatting";
+            }
+        }
+    }
+
+    // OK in the rule window: adds the rule (or shows what's wrong with the value).
+    private void applyConditionalDialog() {
+        ConditionalDialog dialog = conditionalDialog;
+        int[] area = conditionalRange;
+
+        if (dialog == null || area == null) {
+            return;
+        }
+
+        String where = rangeRef(area[0], area[1], area[2], area[3]);
+
+        try {
+            changeRules(dialog.condition().label().replace("...", "") + " rule on " + where,
+                    () -> manager.addConditionalRule(sheetIndex, area[0], area[1], area[2], area[3],
+                            dialog.condition(), dialog.value(0), dialog.value(1), dialog.look()));
+            conditionalDialog = null;
+        } catch (IllegalArgumentException exception) {
+            dialog.setError(exception.getMessage());
+        }
+    }
+
+    // Runs a change to the sheet's rules as one undo step. An
+    // IllegalArgumentException (a bad value) is passed on and nothing changes.
+    private void changeRules(String description, Runnable change) {
+        ConditionalFormats.State before = manager.captureConditionalState(sheetIndex);
+
+        try {
+            change.run();
+        } catch (IllegalArgumentException exception) {
+            manager.restoreConditionalState(sheetIndex, before);
+            throw exception;
+        } catch (RuntimeException | LinkageError exception) {
+            manager.restoreConditionalState(sheetIndex, before);
+            status = "Could not change the conditional formatting: " + describe(exception);
+            return;
+        }
+
+        ConditionalFormats.State after = manager.captureConditionalState(sheetIndex);
+
+        undoHistory.push(CellEdit.ruleChange(sheetIndex, rangeTop(), rangeLeft(),
+                new RuleChange(before, after, description)));
+        redoHistory.clear();
+        markDirty();
+        status = Character.toUpperCase(description.charAt(0)) + description.substring(1);
+    }
+
     private void closePopups() {
+        if (groupPanel != null) {
+            groupPanel.close();
+        }
+
+        conditionalMenu.close();
         palette.close();
         formatMenu.close();
         pasteMenu.close();
@@ -4003,6 +5173,14 @@ public class SpreadsheetScreen extends Screen {
         applyFormat(new CellFormat.Change(CellFormat.Kind.ALIGN, current == code ? 0 : code));
     }
 
+    // 1 = top, 2 = middle, 3 = bottom. Clicking the active one again goes
+    // back to bottom, Excel's default.
+    private void applyVerticalAlignment(int code) {
+        int current = activeFormat().vAlign();
+
+        applyFormat(new CellFormat.Change(CellFormat.Kind.V_ALIGN, current == code ? 3 : code));
+    }
+
     private void changeFontSize(int delta) {
         int size = Math.max(6, Math.min(72, activeFormat().fontPoints() + delta));
 
@@ -4019,7 +5197,7 @@ public class SpreadsheetScreen extends Screen {
         boolean applied = applyFormat((row, column) -> change);
 
         if (applied && change.kind() == CellFormat.Kind.FONT_SIZE) {
-            fitRowHeights(rangeTop(), rangeBottom(), change.value());
+            fitRowHeights(rangeTop(), actionBottom(), change.value());
         }
     }
 
@@ -4034,9 +5212,9 @@ public class SpreadsheetScreen extends Screen {
         commitPendingEdit();
 
         int top = rangeTop();
-        int bottom = rangeBottom();
+        int bottom = actionBottom();
         int left = rangeLeft();
-        int right = rangeRight();
+        int right = actionRight();
 
         if ((long) (bottom - top + 1) * (right - left + 1) > MAX_CLEAR_CELLS) {
             status = "Selection too large to format";
@@ -4104,7 +5282,9 @@ public class SpreadsheetScreen extends Screen {
 
     // Puts a value or formatting edit back (undo) or applies it again (redo).
     private void applyEdit(CellEdit edit, boolean forward) {
-        if (edit.table() != null) {
+        if (edit.rules() != null) {
+            manager.restoreConditionalState(edit.sheet(), forward ? edit.rules().after() : edit.rules().before());
+        } else if (edit.table() != null) {
             manager.restoreTableState(edit.sheet(), forward ? edit.table().after() : edit.table().before());
             filterMenu.close();
             // Filters may have hidden or shown rows.
@@ -4138,7 +5318,11 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
-        if (ribbonTab == TAB_HOME) {
+        // A collapsed group's extras are drawn by its dropdown instead.
+        boolean fontShown = !collapsedGroups.contains(HomeGroup.FONT);
+        boolean numberShown = !collapsedGroups.contains(HomeGroup.NUMBER);
+
+        if (ribbonTab == TAB_HOME && fontShown) {
             int barY = RIBBON_ROW2_Y + BUTTON_HEIGHT - 4;
 
             graphics.fill(fillButtonX + 4, barY, fillButtonX + 26, barY + 3, 0xFF000000 | lastFillColor);
@@ -4156,7 +5340,9 @@ public class SpreadsheetScreen extends Screen {
                     Integer.toString(activeFormat().fontPoints()),
                     sizeLabelX + (18 - this.font.width(Integer.toString(activeFormat().fontPoints()))) / 2, RIBBON_ROW1_Y + BUTTON_TEXT_Y, 0xFFFFFFFF
             );
+        }
 
+        if (ribbonTab == TAB_HOME && numberShown) {
             // The dropdown button shows the name of the active cell's number format.
             graphics.drawString(
                     this.font,
@@ -4174,12 +5360,30 @@ public class SpreadsheetScreen extends Screen {
         beginOverlay(graphics);
         cellMenu.render(graphics, this.font, mouseX, mouseY);
         miniToolbar.render(graphics, this.font, mouseX, mouseY);
+
+        if (groupPanel != null) {
+            groupPanel.render(graphics, this.font, mouseX, mouseY);
+        }
+
         palette.render(graphics, this.font, mouseX, mouseY);
         formatMenu.render(graphics, this.font, mouseX, mouseY, activeFormat().numberFormat());
         pasteMenu.render(graphics, this.font, mouseX, mouseY);
         borderMenu.render(graphics, this.font, mouseX, mouseY, penStyle, penColor);
         functionMenu.render(graphics, this.font, mouseX, mouseY);
         filterMenu.render(graphics, this.font, mouseX, mouseY);
+        syncAutocomplete();
+        autocomplete.render(graphics, this.font, mouseX, mouseY);
+        conditionalMenu.render(graphics, this.font, mouseX, mouseY);
+
+        // The rule window, over a dimmed screen (one layer higher again).
+        if (conditionalDialog != null) {
+            graphics.fill(0, 0, this.width, this.height, 0x80000000);
+            beginOverlay(graphics);
+            conditionalDialog.place(this.width, this.height);
+            conditionalDialog.render(graphics, this.font, mouseX, mouseY);
+            endOverlay(graphics);
+        }
+
         endOverlay(graphics);
     }
 
@@ -4272,6 +5476,35 @@ public class SpreadsheetScreen extends Screen {
         int[] accents = {0x595959, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5, 0x70AD47};
 
         return accents[((number - 1) % 7 + 7) % 7];
+    }
+
+    // A conditional formatting data bar: Excel's gradient fill, fading to
+    // white on the right, with a solid edge in the bar's color.
+    private static void drawDataBar(GuiGraphics graphics, int x, int y, int cw, int ch,
+                                    ConditionalFormats.Style style) {
+        int color = Math.max(0, style.barColor());
+        int left = x + 2;
+        int top = y + 2;
+        int bottom = y + ch - 2;
+        int width = (int) Math.round((cw - 4) * style.bar());
+
+        if (width <= 0 || bottom <= top) {
+            return;
+        }
+
+        int steps = Math.min(width, 8);
+
+        for (int i = 0; i < steps; i++) {
+            int from = left + width * i / steps;
+            int to = left + width * (i + 1) / steps;
+
+            graphics.fill(from, top, to, bottom, 0xFF000000 | lighten(color, 0.7 * i / steps));
+        }
+
+        graphics.fill(left, top, left + width, top + 1, 0xFF000000 | color);
+        graphics.fill(left, bottom - 1, left + width, bottom, 0xFF000000 | color);
+        graphics.fill(left, top, left + 1, bottom, 0xFF000000 | color);
+        graphics.fill(left + width - 1, top, left + width, bottom, 0xFF000000 | color);
     }
 
     private static int lighten(int rgb, double amount) {
@@ -4408,7 +5641,7 @@ public class SpreadsheetScreen extends Screen {
     // The selected cells, or the block of data around the selected cell.
     private int[] selectionOrRegion() {
         if (hasMultiSelection()) {
-            return new int[] {rangeTop(), rangeLeft(), rangeBottom(), rangeRight()};
+            return new int[] {rangeTop(), rangeLeft(), actionBottom(), actionRight()};
         }
 
         return manager.detectRegion(sheetIndex, selectedRow, selectedColumn);

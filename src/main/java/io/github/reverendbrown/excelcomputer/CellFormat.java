@@ -13,13 +13,14 @@ public record CellFormat(
         boolean underline,
         int fontPoints,
         int hAlign,           // 0 = general, 1 = left, 2 = center, 3 = right
+        int vAlign,           // 1 = top, 2 = middle, 3 = bottom (Excel's default)
         String numberFormat,  // Excel's format code, for example "General" or "0.00%"
         boolean numeric,      // the cell holds a number (numbers are right-aligned by default)
         Borders borders
 ) {
     /** A cell without any formatting. */
     public static final CellFormat DEFAULT =
-            new CellFormat(-1, -1, false, false, false, 11, 0, "General", false, Borders.NONE);
+            new CellFormat(-1, -1, false, false, false, 11, 0, 3, "General", false, Borders.NONE);
 
     // Border line styles (the subset of Excel's that this mod draws).
     public static final int LINE_NONE = 0;
@@ -57,7 +58,7 @@ public record CellFormat(
 
     /** The kinds of formatting change the Home tab can make. */
     public enum Kind {
-        FILL, FONT_COLOR, BOLD, ITALIC, UNDERLINE, FONT_SIZE, ALIGN,
+        FILL, FONT_COLOR, BOLD, ITALIC, UNDERLINE, FONT_SIZE, ALIGN, V_ALIGN,
         NUMBER_FORMAT, DECIMALS, BORDER, RESET
     }
 
@@ -92,7 +93,7 @@ public record CellFormat(
 
     public CellFormat withNumeric(boolean numeric) {
         return new CellFormat(
-                fill, fontColor, bold, italic, underline, fontPoints, hAlign,
+                fill, fontColor, bold, italic, underline, fontPoints, hAlign, vAlign,
                 numberFormat, numeric, borders
         );
     }

@@ -4,8 +4,10 @@ plugins {
 }
 
 // DO NOT set group = ...!
-version = "${property("mod.version")}+${sc.current.version}"
-base.archivesName = "${property("mod.id") as String}-fabric"
+version = "${property("mod.version")}-${sc.current.version}"
+// Jar file name: ExcelonaStick-<loader>-<mod version>-<Minecraft version>.jar.
+// Only the file name; the loaders identify the mod by mod.id inside the jar.
+base.archivesName = "ExcelonaStick-fabric"
 
 val requiredJava: JavaVersion = when {
     sc.current.parsed >= "26.1" -> JavaVersion.VERSION_25

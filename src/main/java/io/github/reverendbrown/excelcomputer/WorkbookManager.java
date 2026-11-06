@@ -1,5 +1,10 @@
 package io.github.reverendbrown.excelcomputer;
 
+import org.apache.poi.ss.formula.FormulaParseException;
+import org.apache.poi.ss.formula.FormulaParser;
+import org.apache.poi.ss.formula.FormulaType;
+import org.apache.poi.ss.formula.eval.NotImplementedException;
+import org.apache.poi.xssf.usermodel.XSSFEvaluationWorkbook;
 import org.apache.poi.ss.usermodel.BorderStyle;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
@@ -9,6 +14,7 @@ import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.Font;
 import org.apache.poi.ss.usermodel.FormulaEvaluator;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
+import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.usermodel.IndexedColors;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
@@ -68,12 +74,77 @@ public class WorkbookManager implements AutoCloseable {
     // Styles already created by a formatting change, so repeating one reuses the style.
     private final Map<String, Integer> derivedStyles = new HashMap<>();
 
+    // Conditional formatting rules and how they color cells (null for a .csv file).
+    private final ConditionalFormats conditional;
+
     private WorkbookManager(Workbook workbook) {
         this.workbook = workbook;
         this.evaluator = workbook == null
                 ? null
                 : workbook.getCreationHelper().createFormulaEvaluator();
         this.csvMode = workbook == null;
+        this.conditional = workbook instanceof XSSFWorkbook xssf
+                ? new ConditionalFormats(xssf, evaluator)
+                : null;
+    }
+
+    // ----- conditional formatting (see ConditionalFormats) -----
+
+    /** How conditional formatting changes a cell, or null when it doesn't. */
+    public ConditionalFormats.Style getConditionalStyle(int sheetIndex, int row, int column) {
+        if (conditional == null) {
+            return null;
+        }
+
+        try {
+            return conditional.styleAt(sheetIndex, row, column);
+        } catch (RuntimeException exception) {
+            return null;
+        }
+    }
+
+    private ConditionalFormats conditional() {
+        if (conditional == null) {
+            throw new IllegalArgumentException("Conditional formatting needs an .xlsx workbook");
+        }
+
+        return conditional;
+    }
+
+    /** Adds a Highlight Cells or Top/Bottom rule; throws IllegalArgumentException for bad values. */
+    public void addConditionalRule(int sheetIndex, int top, int left, int bottom, int right,
+                                   ConditionalFormats.Condition condition, String value1, String value2,
+                                   ConditionalFormats.Highlight look) {
+        conditional().addRule(sheetIndex, new CellRangeAddress(top, bottom, left, right),
+                condition, value1, value2, look);
+    }
+
+    public void addColorScale(int sheetIndex, int top, int left, int bottom, int right,
+                              ConditionalFormats.ColorScale scale) {
+        conditional().addColorScale(sheetIndex, new CellRangeAddress(top, bottom, left, right), scale);
+    }
+
+    public void addDataBar(int sheetIndex, int top, int left, int bottom, int right,
+                           ConditionalFormats.DataBar bar) {
+        conditional().addDataBar(sheetIndex, new CellRangeAddress(top, bottom, left, right), bar);
+    }
+
+    /** Takes the range out of every rule; returns true if anything changed. */
+    public boolean clearConditionalRules(int sheetIndex, int top, int left, int bottom, int right) {
+        return conditional().clearRules(sheetIndex, new CellRangeAddress(top, bottom, left, right));
+    }
+
+    /** Removes every rule on the sheet; returns true if there were any. */
+    public boolean clearAllConditionalRules(int sheetIndex) {
+        return conditional().clearAllRules(sheetIndex);
+    }
+
+    public ConditionalFormats.State captureConditionalState(int sheetIndex) {
+        return conditional().capture(sheetIndex);
+    }
+
+    public void restoreConditionalState(int sheetIndex, ConditionalFormats.State state) {
+        conditional().restore(sheetIndex, state);
     }
 
     public static WorkbookManager open(Path path) throws IOException {
@@ -192,6 +263,11 @@ public class WorkbookManager implements AutoCloseable {
         }
 
         return rows;
+    }
+
+    /** True for a .csv file: cells hold plain text and formulas aren't evaluated. */
+    public boolean isCsv() {
+        return csvMode;
     }
 
     public int getSheetCount() {
@@ -331,6 +407,7 @@ public class WorkbookManager implements AutoCloseable {
                 font.getUnderline() != Font.U_NONE,
                 Math.max(1, Math.round(font.getFontHeightInPoints())),
                 alignmentCode(style.getAlignment()),
+                verticalCode(style.getVerticalAlignment()),
                 style.getDataFormatString() == null ? "General" : style.getDataFormatString(),
                 false,
                 bordersOf(style)
@@ -464,7 +541,7 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     // The color as 0xRRGGBB (theme colors and tints resolved), or -1 for none/automatic.
-    private static int rgbOf(XSSFColor color) {
+    static int rgbOf(XSSFColor color) {
         if (color == null || (color.isIndexed() && color.getIndexed() >= 64)) {
             return -1;
         }
@@ -512,6 +589,36 @@ public class WorkbookManager implements AutoCloseable {
         }
     }
 
+    // 1 = top, 2 = middle, 3 = bottom. Justify and distributed are drawn in
+    // the middle; a style without one is at the bottom, as in Excel.
+    private static int verticalCode(VerticalAlignment alignment) {
+        if (alignment == null) {
+            return 3;
+        }
+
+        switch (alignment) {
+            case TOP:
+                return 1;
+            case CENTER:
+            case JUSTIFY:
+            case DISTRIBUTED:
+                return 2;
+            default:
+                return 3;
+        }
+    }
+
+    private static VerticalAlignment verticalOf(int code) {
+        switch (code) {
+            case 1:
+                return VerticalAlignment.TOP;
+            case 2:
+                return VerticalAlignment.CENTER;
+            default:
+                return VerticalAlignment.BOTTOM;
+        }
+    }
+
     private static HorizontalAlignment alignmentOf(int code) {
         switch (code) {
             case 1:
@@ -541,6 +648,8 @@ public class WorkbookManager implements AutoCloseable {
                 return format.fontPoints() == change.value();
             case ALIGN:
                 return format.hAlign() == change.value();
+            case V_ALIGN:
+                return format.vAlign() == change.value();
             case NUMBER_FORMAT:
                 return format.numberFormat().equals(change.text());
             case BORDER:
@@ -710,6 +819,9 @@ public class WorkbookManager implements AutoCloseable {
                 break;
             case ALIGN:
                 style.setAlignment(alignmentOf(change.value()));
+                break;
+            case V_ALIGN:
+                style.setVerticalAlignment(verticalOf(change.value()));
                 break;
             case BORDER:
                 applyBorder(style, change);
@@ -1491,6 +1603,55 @@ public class WorkbookManager implements AutoCloseable {
 
     private static final int MAX_COLUMN_UNITS = 255 * 256;
 
+    /** The width of a column with no width of its own (Excel's standard width). */
+    public int getDefaultColumnWidthPixels(int sheetIndex) {
+        if (csvMode) return 70;
+
+        // Stored in characters. Converted the way POI's getColumnWidthInPixels
+        // does for a column with no width, so it matches what the grid draws.
+        return Math.max(8, Math.round(workbook.getSheetAt(sheetIndex).getDefaultColumnWidth() * 7.0017f));
+    }
+
+    /** The height of a row with no height of its own. */
+    public int getDefaultRowHeightPixels(int sheetIndex) {
+        if (csvMode) return 20;
+
+        return Math.max(6, Math.round(workbook.getSheetAt(sheetIndex).getDefaultRowHeightInPoints() * 4f / 3f));
+    }
+
+    /**
+     * The last row that has any cells (0-based), or -1 for an empty sheet.
+     * Whole-column selections stop here for actions like Clear and Format.
+     */
+    public int getLastUsedRow(int sheetIndex) {
+        if (csvMode) {
+            return csvRows.size() - 1;
+        }
+
+        return workbook.getSheetAt(sheetIndex).getLastRowNum();
+    }
+
+    /**
+     * The last column that has any cells (0-based), or -1 for an empty sheet.
+     */
+    public int getLastUsedColumn(int sheetIndex) {
+        int last = -1;
+
+        if (csvMode) {
+            for (List<String> row : csvRows) {
+                last = Math.max(last, row.size() - 1);
+            }
+
+            return last;
+        }
+
+        for (Row row : workbook.getSheetAt(sheetIndex)) {
+            last = Math.max(last, row.getLastCellNum() - 1);
+        }
+
+        return last;
+    }
+
     /**
      * Column width in pixels, as stored in the file (or the sheet's default).
      */
@@ -1688,10 +1849,65 @@ public class WorkbookManager implements AutoCloseable {
         }
 
         try {
+            if (cell.getCellType() == CellType.STRING) {
+                String error = brokenFormulaError(cell);
+
+                if (error != null) {
+                    return error;
+                }
+            }
+
             return formatter.formatCellValue(cell, evaluator);
         } catch (RuntimeException exception) {
-            return "#ERROR!";
+            return evaluationError(exception);
         }
+    }
+
+    // A formula that POI read but couldn't calculate. A function it doesn't
+    // know (a typo like "=SUMM(A1)") is #NAME? as in Excel; anything else #VALUE!.
+    private static String evaluationError(RuntimeException exception) {
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            if (cause instanceof NotImplementedException) {
+                return "#NAME?";
+            }
+        }
+
+        return "#VALUE!";
+    }
+
+    // Unreadable formulas are stored as text (see writeValue), so the error
+    // each one shows is worked out once and remembered.
+    private final Map<String, String> brokenFormulaErrors = new HashMap<>();
+
+    /**
+     * The error shown for a text cell holding a formula that couldn't be read
+     * (like "=A1+"), or null for ordinary text. Text typed with a leading
+     * apostrophe in Excel ('=...) is ordinary text.
+     */
+    private String brokenFormulaError(Cell cell) {
+        String text = cell.getStringCellValue();
+
+        if (text.length() < 2 || text.charAt(0) != '=' || cell.getCellStyle().getQuotePrefixed()
+                || !(workbook instanceof XSSFWorkbook xssf)) {
+            return null;
+        }
+
+        String error = brokenFormulaErrors.computeIfAbsent(text, formula -> {
+            try {
+                FormulaParser.parse(closeBrackets(formula.substring(1)),
+                        XSSFEvaluationWorkbook.create(xssf), FormulaType.CELL, 0);
+                // It reads fine, so it's text that just starts with "=" ("" = no error).
+                return "";
+            } catch (FormulaParseException exception) {
+                String message = String.valueOf(exception.getMessage());
+
+                return message.contains("does not exist") ? "#NAME?" : "#VALUE!";
+            } catch (RuntimeException exception) {
+                return "#VALUE!";
+            }
+        });
+
+        return error.isEmpty() ? null : error;
     }
 
     /**
@@ -1791,6 +2007,11 @@ public class WorkbookManager implements AutoCloseable {
         } catch (RuntimeException exception) {
             // Keep the entered values if evaluation is unsupported.
         }
+
+        // Conditional formatting depends on the values, so work it out again.
+        if (conditional != null) {
+            conditional.invalidate();
+        }
     }
 
     // Writes the typed text into the cell. Returns the number format the text
@@ -1818,8 +2039,20 @@ public class WorkbookManager implements AutoCloseable {
         if (text.startsWith("=") && text.length() > 1) {
             // The formula is validated before the cell changes, so an
             // invalid formula throws and leaves the old content untouched.
-            cell.setCellFormula(text.substring(1));
-            return impliedFormulaFormat(text.substring(1));
+            String formula = closeBrackets(text.substring(1));
+
+            try {
+                cell.setCellFormula(formula);
+            } catch (FormulaParseException exception) {
+                // A formula POI can't read (unfinished, like "=A1+", or an
+                // unknown name) is still entered: it's kept as text and the
+                // cell shows #NAME? or #VALUE! until it's fixed (see getCellText).
+                cell.setBlank();
+                cell.setCellValue(text);
+                return null;
+            }
+
+            return impliedFormulaFormat(formula);
         }
 
         // Clears any old formula or value before writing the new one.
@@ -1848,6 +2081,32 @@ public class WorkbookManager implements AutoCloseable {
         }
 
         return null;
+    }
+
+    // Adds the closing brackets a formula is missing, like Excel does on
+    // Enter, so "SUM(A1:A5" (as left by formula autocomplete) works.
+    // Brackets inside "text" don't count.
+    static String closeBrackets(String formula) {
+        int open = 0;
+        boolean inString = false;
+
+        for (int i = 0; i < formula.length(); i++) {
+            char c = formula.charAt(i);
+
+            if (c == '"') {
+                inString = !inString;
+            } else if (!inString && c == '(') {
+                open++;
+            } else if (!inString && c == ')') {
+                open--;
+            }
+        }
+
+        if (inString || open <= 0) {
+            return formula;
+        }
+
+        return formula + ")".repeat(open);
     }
 
     // ----- typed numbers: $5, 12.5%, 1,234, (5), dates and times -----
