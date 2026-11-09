@@ -1,6 +1,8 @@
 package io.github.reverendbrown.excelcomputer.item;
 
 import io.github.reverendbrown.excelcomputer.ExcelComputer;
+import io.github.reverendbrown.excelcomputer.logistics.HubTier;
+import java.util.Locale;
 //? if fabric {
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.minecraft.core.Registry;
@@ -56,6 +58,47 @@ public class ModItems {
             *///?}
     );
 
+    public static final ResourceKey<Item> EXCEL_GUIDE_KEY =
+            ResourceKey.create(Registries.ITEM, ExcelComputer.id("excel_guide"));
+
+    // A book that opens the step-by-step guide.
+    public static final Item EXCEL_GUIDE = new GuideBookItem(
+            //? if >=1.21.2 {
+            new Item.Properties()
+                    .setId(EXCEL_GUIDE_KEY)
+                    .stacksTo(1)
+            //?} else {
+            /*new Item.Properties()
+                    .stacksTo(1)
+            *///?}
+    );
+
+    // Hub Upgrades, indexed by the tier they make (none for Copper, the lowest).
+    public static final Item[] HUB_UPGRADES = new Item[HubTier.values().length];
+
+    static {
+        for (HubTier tier : HubTier.values()) {
+            if (tier.ordinal() == 0) {
+                continue;
+            }
+
+            HUB_UPGRADES[tier.ordinal()] = new HubUpgradeItem(
+                    //? if >=1.21.2 {
+                    new Item.Properties()
+                            .setId(ResourceKey.create(Registries.ITEM, ExcelComputer.id(upgradeId(tier)))),
+                    //?} else {
+                    /*new Item.Properties(),
+                    *///?}
+                    tier
+            );
+        }
+    }
+
+    /** The registry path of the upgrade that makes this tier, e.g. iron_hub_upgrade. */
+    public static String upgradeId(HubTier tier) {
+        return tier.name().toLowerCase(Locale.ROOT) + "_hub_upgrade";
+    }
+
     //? if fabric {
     public static void initialize() {
         Registry.register(
@@ -73,11 +116,30 @@ public class ModItems {
                 EXCEL_PAPER_KEY,
                 EXCEL_PAPER
         );
+        Registry.register(
+                BuiltInRegistries.ITEM,
+                EXCEL_GUIDE_KEY,
+                EXCEL_GUIDE
+        );
+
+        for (HubTier tier : HubTier.values()) {
+            if (HUB_UPGRADES[tier.ordinal()] != null) {
+                Registry.register(BuiltInRegistries.ITEM, ExcelComputer.id(upgradeId(tier)),
+                        HUB_UPGRADES[tier.ordinal()]);
+            }
+        }
 
         ItemGroupEvents.modifyEntriesEvent(CreativeModeTabs.TOOLS_AND_UTILITIES)
                 .register(entries -> {
                     entries.accept(EXCEL_ON_A_STICK);
                     entries.accept(EXCEL_PAPER);
+                    entries.accept(EXCEL_GUIDE);
+
+                    for (Item upgrade : HUB_UPGRADES) {
+                        if (upgrade != null) {
+                            entries.accept(upgrade);
+                        }
+                    }
                 });
     }
 //?}

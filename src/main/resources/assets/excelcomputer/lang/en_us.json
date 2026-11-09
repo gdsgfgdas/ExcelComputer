@@ -1,6 +1,15 @@
 {
-  "block.excelcomputer.excel_computer": "Excel Computer",
+  "block.excelcomputer.excel_computer": "Excel Table",
+  "block.excelcomputer.redstone_connector": "Redstone Connector",
+  "block.excelcomputer.copper_logistics_hub": "Copper Logistics Hub",
+  "block.excelcomputer.iron_logistics_hub": "Iron Logistics Hub",
+  "block.excelcomputer.diamond_logistics_hub": "Diamond Logistics Hub",
+  "block.excelcomputer.netherite_logistics_hub": "Netherite Logistics Hub",
+  "item.excelcomputer.iron_hub_upgrade": "Iron Hub Upgrade",
+  "item.excelcomputer.diamond_hub_upgrade": "Diamond Hub Upgrade",
+  "item.excelcomputer.netherite_hub_upgrade": "Netherite Hub Upgrade",
   "item.excelcomputer.excel_on_a_stick": "Excel on a Stick",
   "item.excelcomputer.excel_paper": "Excel Paper",
+  "item.excelcomputer.excel_guide": "Excel Guide",
   "item.excelcomputer.shared_workbook": "Shared Workbook"
 }

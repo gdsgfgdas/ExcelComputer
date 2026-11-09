@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "MEM",
+    "MCM",
+    "MMM"
+  ],
+  "key": {
+    "M": "minecraft:diamond",
+    "E": "minecraft:ender_pearl",
+    "C": "excelcomputer:excel_computer"
+  },
+  "result": {
+    "id": "excelcomputer:diamond_logistics_hub",
+    "count": 1
+  }
+}

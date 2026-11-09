@@ -52,7 +52,7 @@ legacyForge {
         }
 
         register("server") {
-            gameDirectory = rootProject.file("run/${project.name}")
+            gameDirectory = rootProject.file("run/${project.name}-server")
             server()
         }
     }
@@ -64,6 +64,11 @@ dependencies {
         add(shadowBundle.name, library)
         add("additionalRuntimeClasspath", library)
     }
+
+    // POI's module descriptor requires commons-codec. The client gets it from
+    // Minecraft, the dedicated server does not, so the dev server gets it here.
+    // (Only for runs: the mod jar shades POI, so it has no module descriptor.)
+    add("additionalRuntimeClasspath", "commons-codec:commons-codec:1.15")
 }
 
 java {
@@ -108,6 +113,15 @@ tasks {
         }
 
         exclude("fabric.mod.json", "META-INF/neoforge.mods.toml", "*.ct", "*.classtweaker")
+
+        // The Redstone Connector is hidden until it is finished (see REDSTONE_CONNECTOR in
+        // ExcelComputer.java): its recipe, loot table, model and texture stay out too.
+        val redstoneConnector = rootProject.file("src/main/java/io/github/reverendbrown/excelcomputer/ExcelComputer.java")
+            .readText().contains("REDSTONE_CONNECTOR = true")
+        inputs.property("redstoneConnector", redstoneConnector)
+        if (!redstoneConnector) {
+            exclude("**/redstone_connector.json", "**/redstone_connector.png")
+        }
     }
 
     named("createMinecraftArtifacts") {
@@ -136,6 +150,11 @@ tasks {
         // stored inside its binary .xsb files.
         relocate("com.zaxxer.sparsebits", "io.github.reverendbrown.excelcomputer.libs.sparsebits")
         relocate("com.graphbuilder", "io.github.reverendbrown.excelcomputer.libs.graphbuilder")
+
+        // The parts of POI the mod never uses (Word, PowerPoint, Visio...), see gradle/poi-trim.txt.
+        val poiTrim = rootProject.file("gradle/poi-trim.txt")
+        inputs.file(poiTrim)
+        exclude(PoiTrim.patterns(poiTrim))
 
         mergeServiceFiles()
 

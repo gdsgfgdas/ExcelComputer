@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "P",
+    "B"
+  ],
+  "key": {
+    "P": "excelcomputer:excel_paper",
+    "B": "minecraft:book"
+  },
+  "result": {
+    "id": "excelcomputer:excel_guide",
+    "count": 1
+  }
+}

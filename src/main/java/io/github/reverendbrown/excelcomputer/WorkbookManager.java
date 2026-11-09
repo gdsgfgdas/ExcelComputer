@@ -147,6 +147,51 @@ public class WorkbookManager implements AutoCloseable {
         conditional().restore(sheetIndex, state);
     }
 
+    /** A new .xlsx workbook with no sheets yet (add some before saving it). */
+    public static WorkbookManager createEmpty() {
+        return new WorkbookManager(new XSSFWorkbook());
+    }
+
+    /**
+     * How much the workbook holds: {filled cells, formula cells} over all
+     * sheets. Stops counting once both exceed the limits given (so a huge
+     * workbook is rejected quickly).
+     */
+    public long[] countContent(long cellLimit, long formulaLimit) {
+        long cells = 0;
+        long formulas = 0;
+
+        if (csvMode) {
+            for (List<String> row : csvRows) {
+                cells += row.size();
+            }
+
+            return new long[] {cells, 0};
+        }
+
+        for (Sheet sheet : workbook) {
+            for (Row row : sheet) {
+                for (Cell cell : row) {
+                    if (cell.getCellType() == CellType.BLANK) {
+                        continue;
+                    }
+
+                    cells++;
+
+                    if (cell.getCellType() == CellType.FORMULA) {
+                        formulas++;
+                    }
+                }
+
+                if (cells > cellLimit && formulas > formulaLimit) {
+                    return new long[] {cells, formulas};
+                }
+            }
+        }
+
+        return new long[] {cells, formulas};
+    }
+
     public static WorkbookManager open(Path path) throws IOException {
         String filename = path.getFileName()
                 .toString()
@@ -272,6 +317,76 @@ public class WorkbookManager implements AutoCloseable {
 
     public int getSheetCount() {
         return csvMode ? 1 : workbook.getNumberOfSheets();
+    }
+
+    /** The index of the sheet with this name (ignoring case), or -1. */
+    public int findSheet(String name) {
+        return csvMode ? -1 : workbook.getSheetIndex(name);
+    }
+
+    /** Adds an empty sheet at the end and returns its index. */
+    public int addSheet(String name) {
+        if (csvMode) {
+            throw new IllegalStateException("A .csv file has only one sheet");
+        }
+
+        workbook.createSheet(name);
+        return workbook.getNumberOfSheets() - 1;
+    }
+
+    /**
+     * Creates or moves a workbook-wide named range, e.g. ("StockCount",
+     * "'Stock'!$C$2:$C$40"). Does nothing in CSV mode.
+     */
+    public void setNamedRange(String name, String reference) {
+        if (csvMode) {
+            return;
+        }
+
+        org.apache.poi.ss.usermodel.Name named = workbook.getName(name);
+
+        if (named == null) {
+            named = workbook.createName();
+            named.setNameName(name);
+        }
+
+        if (!reference.equals(named.getRefersToFormula())) {
+            named.setRefersToFormula(reference);
+        }
+    }
+
+    /**
+     * A cell's number: a number, or a formula's calculated number (after
+     * {@link #recalculate()}), or text that is a plain number. Null otherwise.
+     */
+    public Double getCellNumber(int sheetIndex, int rowIndex, int columnIndex) {
+        if (csvMode) {
+            return null;
+        }
+
+        Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
+
+        if (cell == null) {
+            return null;
+        }
+
+        try {
+            CellType type = cell.getCellType() == CellType.FORMULA
+                    ? cell.getCachedFormulaResultType()
+                    : cell.getCellType();
+
+            if (type == CellType.NUMERIC) {
+                return cell.getNumericCellValue();
+            }
+
+            if (type == CellType.STRING && NUMBER.matcher(cell.getStringCellValue().trim()).matches()) {
+                return Double.parseDouble(cell.getStringCellValue().trim());
+            }
+        } catch (RuntimeException exception) {
+            // Not a number.
+        }
+
+        return null;
     }
 
     public String getSheetName(int index) {

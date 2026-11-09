@@ -2,6 +2,9 @@ package io.github.reverendbrown.excelcomputer.share;
 
 import io.github.reverendbrown.excelcomputer.ExcelComputer;
 import io.github.reverendbrown.excelcomputer.item.SharedWorkbookItem;
+import io.github.reverendbrown.excelcomputer.link.LinkedWorkbooks;
+import io.github.reverendbrown.excelcomputer.logistics.HubDirectory;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
@@ -57,14 +60,21 @@ public final class ShareServer {
         final String name;
         final byte[] data;
         final UUID target;
+        // Set for a Redstone Connector's workbook (target is then null).
+        final BlockPos connector;
         final long startedAt = System.currentTimeMillis();
         int received;
 
         Upload(int transfer, String name, int size, UUID target) {
+            this(transfer, name, size, target, null);
+        }
+
+        Upload(int transfer, String name, int size, UUID target, BlockPos connector) {
             this.transfer = transfer;
             this.name = name;
             this.data = new byte[size];
             this.target = target;
+            this.connector = connector;
         }
     }
 
@@ -98,6 +108,18 @@ public final class ShareServer {
                 case ShareProtocol.COPY_ITEM -> copyItem(player, in.readUuid());
                 case ShareProtocol.LIST_MINE -> listMine(player);
                 case ShareProtocol.DELETE -> deleteShare(player, in.readUuid());
+                case ShareProtocol.CONNECTOR_OPEN -> openConnector(player, in.readUuid(), BlockPos.of(in.readLong()));
+                case ShareProtocol.CONNECTOR_UPLOAD_BEGIN -> beginConnectorUpload(player, in);
+                case ShareProtocol.HUB_QUERY -> HubDirectory.send(player);
+                case ShareProtocol.HUB_CHOOSE -> HubDirectory.choose(player, in.readString(), BlockPos.of(in.readLong()));
+                case ShareProtocol.HUB_RENAME -> HubDirectory.rename(player, in.readString(), BlockPos.of(in.readLong()),
+                        in.readString());
+                case ShareProtocol.HUB_FORGET -> HubDirectory.forget(player, in.readString(), BlockPos.of(in.readLong()));
+                case ShareProtocol.HUB_MEMBER_ADD -> HubDirectory.addMember(player, in.readString(),
+                        BlockPos.of(in.readLong()), in.readString());
+                case ShareProtocol.HUB_MEMBER_REMOVE -> HubDirectory.removeMember(player, in.readString(),
+                        BlockPos.of(in.readLong()), in.readUuid());
+                case ShareProtocol.CONNECTOR_CLOSE -> LinkedWorkbooks.releaseAll(player, BlockPos.of(in.readLong()));
                 default -> {
                 }
             }
@@ -168,6 +190,69 @@ public final class ShareServer {
         UPLOADS.put(player.getUUID(), new Upload(transfer, name, size, target));
     }
 
+    // ----- Blocks with a linked workbook (see LinkedWorkbooks) -----
+
+    private static void openConnector(ServerPlayer player, UUID request, BlockPos pos) {
+        long now = System.currentTimeMillis();
+        LAST_DOWNLOAD.values().removeIf(time -> now - time > DOWNLOAD_COOLDOWN_MS);
+
+        if (LAST_DOWNLOAD.containsKey(player.getUUID())) {
+            downloadFailed(player, request, "Wait a moment before opening it again");
+            return;
+        }
+
+        LAST_DOWNLOAD.put(player.getUUID(), now);
+        LinkedWorkbooks.Target target = LinkedWorkbooks.resolve(player, pos);
+
+        if (target == null) {
+            downloadFailed(player, request, "That block can't hold a workbook");
+            return;
+        }
+
+        target.kind().sendForEditing(player, request, target.level(), pos, target.remote());
+    }
+
+    // Linking a workbook to a connector, or saving the connector's workbook.
+    private static void beginConnectorUpload(ServerPlayer player, ShareProtocol.Reader in) throws IOException {
+        int transfer = in.readInt();
+        String name = ShareProtocol.cleanFileName(in.readString());
+        int size = in.readInt();
+        BlockPos pos = BlockPos.of(in.readLong());
+        long now = System.currentTimeMillis();
+
+        UPLOADS.values().removeIf(upload -> now - upload.startedAt > UPLOAD_TIMEOUT_MS);
+        LAST_UPLOAD.values().removeIf(time -> now - time > UPLOAD_COOLDOWN_MS);
+        UPLOADS.remove(player.getUUID());
+
+        if (name == null) {
+            uploadResult(player, transfer, false, "Only .xlsx workbooks can be linked");
+            return;
+        }
+
+        if (size <= 0 || size > ShareProtocol.MAX_FILE_BYTES) {
+            uploadResult(player, transfer, false,
+                    "Too big to link (the limit is " + ShareProtocol.MAX_FILE_BYTES / (1024 * 1024) + " MB)");
+            return;
+        }
+
+        if (LAST_UPLOAD.containsKey(player.getUUID())) {
+            uploadResult(player, transfer, false, "Wait a moment before saving again");
+            return;
+        }
+
+        LinkedWorkbooks.Target target = LinkedWorkbooks.resolve(player, pos);
+        String problem = target == null ? "That block can't hold a workbook"
+                : target.kind().checkUse(player, target.level(), pos, target.remote());
+
+        if (problem != null) {
+            uploadResult(player, transfer, false, problem);
+            return;
+        }
+
+        LAST_UPLOAD.put(player.getUUID(), now);
+        UPLOADS.put(player.getUUID(), new Upload(transfer, name, size, null, pos));
+    }
+
     private static void uploadChunk(ServerPlayer player, ShareProtocol.Reader in) throws IOException {
         int transfer = in.readInt();
         byte[] chunk = in.readBytes(ShareProtocol.CHUNK_BYTES);
@@ -198,6 +283,17 @@ public final class ShareServer {
 
         if (upload.received != upload.data.length) {
             uploadResult(player, transfer, false, "Upload failed (incomplete)");
+            return;
+        }
+
+        if (upload.connector != null) {
+            LinkedWorkbooks.Target target = LinkedWorkbooks.resolve(player, upload.connector);
+            LinkedWorkbooks.Result result = target == null
+                    ? new LinkedWorkbooks.Result(false, "That block can't hold a workbook any more")
+                    : target.kind().store(player, target.level(), upload.connector, target.remote(),
+                            upload.name, upload.data);
+            LAST_UPLOAD.put(player.getUUID(), System.currentTimeMillis());
+            uploadResult(player, transfer, result.ok(), result.message());
             return;
         }
 
@@ -294,13 +390,20 @@ public final class ShareServer {
             return;
         }
 
+        sendWorkbook(player, id, meta.name(), data, meta.owner().equals(player.getUUID()),
+                meta.ownerName(), meta.expiresAt());
+    }
+
+    /** Sends a workbook file to the player in chunks (a shared one, or a Redstone Connector's). */
+    public static void sendWorkbook(ServerPlayer player, UUID id, String name, byte[] data,
+                                    boolean owner, String ownerName, long expiresAt) {
         ShareNetwork.sendToClient.accept(player, new ShareProtocol.Writer(ShareProtocol.DOWNLOAD_BEGIN)
                 .writeUuid(id)
-                .writeString(meta.name())
+                .writeString(name)
                 .writeInt(data.length)
-                .writeBoolean(meta.owner().equals(player.getUUID()))
-                .writeString(meta.ownerName())
-                .writeLong(meta.expiresAt())
+                .writeBoolean(owner)
+                .writeString(ownerName)
+                .writeLong(expiresAt)
                 .toBytes());
 
         for (int offset = 0; offset < data.length; offset += ShareProtocol.CHUNK_BYTES) {
@@ -316,7 +419,7 @@ public final class ShareServer {
                 .toBytes());
     }
 
-    private static void downloadFailed(ServerPlayer player, UUID id, String message) {
+    public static void downloadFailed(ServerPlayer player, UUID id, String message) {
         ShareNetwork.sendToClient.accept(player, new ShareProtocol.Writer(ShareProtocol.DOWNLOAD_FAILED)
                 .writeUuid(id)
                 .writeString(message)
@@ -427,7 +530,8 @@ public final class ShareServer {
         sendList(player);
     }
 
-    private static void notice(ServerPlayer player, String message) {
+    /** Shows a message on the player's open Excel on a Stick screen (the status line). */
+    public static void notice(ServerPlayer player, String message) {
         ShareNetwork.sendToClient.accept(player, new ShareProtocol.Writer(ShareProtocol.NOTICE)
                 .writeString(message)
                 .toBytes());

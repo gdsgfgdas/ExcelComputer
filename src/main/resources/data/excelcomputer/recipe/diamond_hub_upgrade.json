@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "MRM",
+    "M M",
+    "MMM"
+  ],
+  "key": {
+    "M": "minecraft:diamond",
+    "R": "minecraft:redstone"
+  },
+  "result": {
+    "id": "excelcomputer:diamond_hub_upgrade",
+    "count": 1
+  }
+}

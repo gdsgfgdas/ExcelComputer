@@ -50,6 +50,7 @@ public class SharedWorkbookLoadingScreen extends Screen {
     @Override
     public void removed() {
         showing = false;
+        ShareClient.loadingScreenClosed(this);
         super.removed();
     }
 

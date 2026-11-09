@@ -20,7 +20,9 @@ public class MySharesScreen extends Screen {
     private List<ShareClient.MyShare> shares;
     private int limit = 10;
     private int firstRow;
-    private String status = "Loading your shared sheets...";
+    private static final String LOADING = "Loading your shared sheets...";
+
+    private String status = LOADING;
     // Delete needs two clicks: the first one arms it for that sheet.
     private UUID armedDelete;
     private boolean showing = true;
@@ -38,6 +40,9 @@ public class MySharesScreen extends Screen {
         this.shares = new ArrayList<>(shares);
         this.limit = limit;
         this.armedDelete = null;
+        if (LOADING.equals(this.status)) {
+            this.status = "";
+        }
         this.firstRow = Math.max(0, Math.min(firstRow, shares.size() - visibleRows()));
         rebuildWidgets();
     }

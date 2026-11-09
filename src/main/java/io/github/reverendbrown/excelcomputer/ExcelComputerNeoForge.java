@@ -2,6 +2,7 @@ package io.github.reverendbrown.excelcomputer;
 
 //? if neoforge {
 /*import io.github.reverendbrown.excelcomputer.block.ModBlocks;
+import io.github.reverendbrown.excelcomputer.logistics.HubTier;
 import io.github.reverendbrown.excelcomputer.item.ModItems;
 import io.github.reverendbrown.excelcomputer.share.ShareNetwork;
 import io.github.reverendbrown.excelcomputer.share.SharePayloads;
@@ -31,21 +32,58 @@ public class ExcelComputerNeoForge {
     private static void register(RegisterEvent event) {
         event.register(Registries.BLOCK, helper ->
                 helper.register(ExcelComputer.id("excel_computer"), ModBlocks.EXCEL_COMPUTER));
+        if (ExcelComputer.REDSTONE_CONNECTOR) {
+            event.register(Registries.BLOCK, helper ->
+                    helper.register(ExcelComputer.id("redstone_connector"), ModBlocks.REDSTONE_CONNECTOR));
+        }
+        event.register(Registries.BLOCK, helper -> {
+            for (HubTier tier : HubTier.values()) {
+                helper.register(ExcelComputer.id(tier.id()), ModBlocks.LOGISTICS_HUBS[tier.ordinal()]);
+            }
+        });
 
         event.register(Registries.ITEM, helper -> {
             helper.register(ExcelComputer.id("excel_computer"), ModBlocks.EXCEL_COMPUTER_ITEM);
+            if (ExcelComputer.REDSTONE_CONNECTOR) {
+                helper.register(ExcelComputer.id("redstone_connector"), ModBlocks.REDSTONE_CONNECTOR_ITEM);
+            }
+
+            for (HubTier tier : HubTier.values()) {
+                helper.register(ExcelComputer.id(tier.id()), ModBlocks.LOGISTICS_HUB_ITEMS[tier.ordinal()]);
+            }
+
             helper.register(ExcelComputer.id("excel_on_a_stick"), ModItems.EXCEL_ON_A_STICK);
             helper.register(ExcelComputer.id("shared_workbook"), ModItems.SHARED_WORKBOOK);
             helper.register(ExcelComputer.id("excel_paper"), ModItems.EXCEL_PAPER);
+            helper.register(ExcelComputer.id("excel_guide"), ModItems.EXCEL_GUIDE);
+
+            for (HubTier tier : HubTier.values()) {
+                if (ModItems.HUB_UPGRADES[tier.ordinal()] != null) {
+                    helper.register(ExcelComputer.id(ModItems.upgradeId(tier)), ModItems.HUB_UPGRADES[tier.ordinal()]);
+                }
+            }
         });
     }
 
     private static void addToCreativeTabs(BuildCreativeModeTabContentsEvent event) {
         if (event.getTabKey() == CreativeModeTabs.FUNCTIONAL_BLOCKS) {
             event.accept(ModBlocks.EXCEL_COMPUTER_ITEM);
+
+            for (net.minecraft.world.item.Item hub : ModBlocks.LOGISTICS_HUB_ITEMS) {
+                event.accept(hub);
+            }
+        } else if (event.getTabKey() == CreativeModeTabs.REDSTONE_BLOCKS && ExcelComputer.REDSTONE_CONNECTOR) {
+            event.accept(ModBlocks.REDSTONE_CONNECTOR_ITEM);
         } else if (event.getTabKey() == CreativeModeTabs.TOOLS_AND_UTILITIES) {
             event.accept(ModItems.EXCEL_ON_A_STICK);
             event.accept(ModItems.EXCEL_PAPER);
+            event.accept(ModItems.EXCEL_GUIDE);
+
+            for (net.minecraft.world.item.Item upgrade : ModItems.HUB_UPGRADES) {
+                if (upgrade != null) {
+                    event.accept(upgrade);
+                }
+            }
         }
     }
 

@@ -1,13 +1,12 @@
-
 {
   "parent": "minecraft:block/cube",
   "textures": {
     "up": "excelcomputer:block/excel_computer_top",
     "down": "excelcomputer:block/excel_computer_bottom",
-    "north": "excelcomputer:block/excel_computer_side_a",
-    "south": "excelcomputer:block/excel_computer_side_a",
-    "east": "excelcomputer:block/excel_computer_side_b",
-    "west": "excelcomputer:block/excel_computer_side_b",
-    "particle": "excelcomputer:block/excel_computer_side_a"
+    "north": "excelcomputer:block/excel_computer_side_north",
+    "south": "excelcomputer:block/excel_computer_side_south",
+    "east": "excelcomputer:block/excel_computer_side_east",
+    "west": "excelcomputer:block/excel_computer_side_west",
+    "particle": "excelcomputer:block/excel_computer_side_south"
   }
 }

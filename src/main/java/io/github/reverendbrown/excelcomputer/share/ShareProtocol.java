@@ -33,6 +33,24 @@ public final class ShareProtocol {
     public static final byte COPY_ITEM = 5;
     public static final byte LIST_MINE = 6;
     public static final byte DELETE = 7;
+    // Redstone Connectors: open the linked workbook (request id, position),
+    // and start an upload that links or updates it (transfer, name, size,
+    // position; the chunks and end are the usual UPLOAD_CHUNK and UPLOAD_END).
+    public static final byte CONNECTOR_OPEN = 8;
+    public static final byte CONNECTOR_UPLOAD_BEGIN = 9;
+    // Logistics Hubs: ask for the player's hubs (answered with HUB_LIST).
+    public static final byte HUB_QUERY = 10;
+    // Logistics Hubs, each naming a hub by dimension (string) and position (long):
+    // make it the active one, rename it (then the name, a string), forget it.
+    public static final byte HUB_CHOOSE = 21;
+    public static final byte HUB_RENAME = 22;
+    public static final byte HUB_FORGET = 23;
+    // The owner gives an online player access to a hub (then the player's name)
+    // or takes it away (then the member's id).
+    public static final byte HUB_MEMBER_ADD = 24;
+    public static final byte HUB_MEMBER_REMOVE = 25;
+    // The player closed a linked block's workbook (position): someone else may edit it now.
+    public static final byte CONNECTOR_CLOSE = 26;
 
     // Server to client.
     public static final byte UPLOAD_RESULT = 11;
@@ -42,6 +60,9 @@ public final class ShareProtocol {
     public static final byte DOWNLOAD_FAILED = 15;
     public static final byte NOTICE = 16;
     public static final byte MY_SHARES = 17;
+    // The hubs the player knows, which Excel on a Stick can open from anywhere:
+    // a count, then per hub its position, dimension, name, tier and whether it is active.
+    public static final byte HUB_LIST = 18;
 
     // A shared .xlsx may unpack to at most this much (it is a zip). Larger ones
     // could freeze or crash the game of whoever opens them, so they are refused.
@@ -125,6 +146,55 @@ public final class ShareProtocol {
         }
 
         return stem + extension;
+    }
+
+    /**
+     * An .xlsx is a zip, and a small one can unpack into something huge
+     * (a "zip bomb") that would freeze or crash whoever opens it. This
+     * unpacks it once without keeping anything, counting the bytes. Used by
+     * the client before opening a shared workbook and by the server before
+     * opening a Redstone Connector's.
+     *
+     * @return null if it is safe to open, otherwise why not
+     */
+    public static String checkSafeToOpen(String name, byte[] data) {
+        return checkSafeToOpen(name, data, MAX_UNPACKED_BYTES);
+    }
+
+    /** Like checkSafeToOpen(name, data), with a lower limit for how big it may unpack. */
+    public static String checkSafeToOpen(String name, byte[] data, long maxUnpackedBytes) {
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".xlsx")) {
+            return null; // A CSV is plain text and already at most 4 MB.
+        }
+
+        long total = 0;
+        int entries = 0;
+        byte[] buffer = new byte[64 * 1024];
+
+        try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(new ByteArrayInputStream(data))) {
+            java.util.zip.ZipEntry entry;
+
+            while ((entry = zip.getNextEntry()) != null) {
+                if (++entries > MAX_ZIP_ENTRIES) {
+                    return "This workbook has too many parts to open safely";
+                }
+
+                int read;
+
+                while ((read = zip.read(buffer)) > 0) {
+                    total += read;
+
+                    if (total > maxUnpackedBytes) {
+                        return "This workbook is too large to open safely (over "
+                                + maxUnpackedBytes / (1024 * 1024) + " MB unpacked)";
+                    }
+                }
+            }
+        } catch (IOException exception) {
+            return "This workbook is damaged and can't be opened";
+        }
+
+        return null;
     }
 
     public static final class Writer {

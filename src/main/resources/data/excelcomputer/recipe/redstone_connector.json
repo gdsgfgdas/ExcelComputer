@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "redstone",
+  "pattern": [
+    "IRI",
+    "RPR",
+    "IRI"
+  ],
+  "key": {
+    "I": "minecraft:iron_ingot",
+    "R": "minecraft:redstone",
+    "P": "excelcomputer:excel_paper"
+  },
+  "result": {
+    "id": "excelcomputer:redstone_connector",
+    "count": 1
+  }
+}

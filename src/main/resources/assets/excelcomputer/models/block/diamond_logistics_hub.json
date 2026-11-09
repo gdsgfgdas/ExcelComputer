@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:block/cube_all",
+  "textures": {
+    "all": "excelcomputer:block/diamond_logistics_hub"
+  }
+}

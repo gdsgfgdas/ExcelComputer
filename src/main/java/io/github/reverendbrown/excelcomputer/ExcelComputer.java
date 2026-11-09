@@ -14,6 +14,11 @@ public class ExcelComputer {
 	// That way, it's clear which mod wrote info, warnings, and errors.
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
+	// The Redstone Connector is hidden until it is finished: when false its block
+	// and item are never created or registered, and the build scripts leave out
+	// its resources (they read this line, so keep it as one plain true/false).
+	public static final boolean REDSTONE_CONNECTOR = false;
+
 	public static ResourceLocation id(String path) {
 		//? if >=1.21 {
 		return ResourceLocation.fromNamespaceAndPath(MOD_ID, path);

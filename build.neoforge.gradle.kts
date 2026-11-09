@@ -80,10 +80,6 @@ neoForge {
     }
 }
 
-// The dev server never opens a workbook, and a dedicated server does not ship commons-codec,
-// which POI's module descriptor requires. So the libraries are left out of the dev server.
-val isServerRun = gradle.startParameter.taskNames.any { it.endsWith("runServer") }
-
 // This block comes after neoForge { } on purpose: the NeoForge plugin only
 // creates the "additionalRuntimeClasspath" configuration once its version is set.
 dependencies {
@@ -91,9 +87,17 @@ dependencies {
         implementation(library)
         add(shadowBundle.name, library)
 
-        if (sc.current.parsed < "1.21.9" && !isServerRun) {
+        if (sc.current.parsed < "1.21.9") {
             add("additionalRuntimeClasspath", library)
         }
+    }
+
+    // POI's module descriptor requires commons-codec. The client gets it from
+    // Minecraft, the dedicated server does not, and the server runs POI for the
+    // Logistics Hubs, so the dev server gets it here. (Only for runs: the mod
+    // jar shades POI, so it has no module descriptor.)
+    if (sc.current.parsed < "1.21.9") {
+        add("additionalRuntimeClasspath", "commons-codec:commons-codec:1.16.0")
     }
 }
 
@@ -141,6 +145,15 @@ tasks {
         }
 
         exclude("fabric.mod.json", "META-INF/mods.toml", "pack.mcmeta", "*.ct", "*.classtweaker")
+
+        // The Redstone Connector is hidden until it is finished (see REDSTONE_CONNECTOR in
+        // ExcelComputer.java): its recipe, loot table, model and texture stay out too.
+        val redstoneConnector = rootProject.file("src/main/java/io/github/reverendbrown/excelcomputer/ExcelComputer.java")
+            .readText().contains("REDSTONE_CONNECTOR = true")
+        inputs.property("redstoneConnector", redstoneConnector)
+        if (!redstoneConnector) {
+            exclude("**/redstone_connector.json", "**/redstone_connector.png")
+        }
     }
 
     named("createMinecraftArtifacts") {
@@ -174,6 +187,11 @@ tasks {
         // stored inside its binary .xsb files.
         relocate("com.zaxxer.sparsebits", "io.github.reverendbrown.excelcomputer.libs.sparsebits")
         relocate("com.graphbuilder", "io.github.reverendbrown.excelcomputer.libs.graphbuilder")
+
+        // The parts of POI the mod never uses (Word, PowerPoint, Visio...), see gradle/poi-trim.txt.
+        val poiTrim = rootProject.file("gradle/poi-trim.txt")
+        inputs.file(poiTrim)
+        exclude(PoiTrim.patterns(poiTrim))
 
         mergeServiceFiles()
 

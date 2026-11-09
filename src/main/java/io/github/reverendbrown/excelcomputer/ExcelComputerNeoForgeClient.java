@@ -21,6 +21,13 @@ public class ExcelComputerNeoForgeClient {
         ClientHooks.openWorkbookPicker = () ->
                 Minecraft.getInstance().setScreen(new WorkbookPickerScreen());
         ClientHooks.openSharedWorkbook = ShareClient::openShared;
+        ClientHooks.linkConnector = pos ->
+                Minecraft.getInstance().setScreen(new WorkbookPickerScreen(pos));
+        ClientHooks.openConnector = ShareClient::openConnector;
+        ClientHooks.openSelectedHub = ShareClient::openSelectedHub;
+        ClientHooks.guideTooltip = io.github.reverendbrown.excelcomputer.guide.GuideScreen::tooltip;
+        ClientHooks.openGuide = () -> net.minecraft.client.Minecraft.getInstance().setScreen(
+                new io.github.reverendbrown.excelcomputer.guide.GuideScreen(null, "start"));
         ShareNetwork.clientReceiver = ShareClient::receive;
 
         ShareNetwork.sendToServer = message ->

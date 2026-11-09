@@ -402,6 +402,11 @@ public class SpreadsheetScreen extends Screen {
                 manager = pendingOpen.join();
                 status = shared == null
                         ? "Workbook: " + workbookPath.getFileName()
+                        : shared.isConnector()
+                        ? ShareClient.isHub(shared.connector())
+                        ? ShareClient.linkedLabel(shared.connector())
+                                + ": the Transfers sheet says what to move. Save to update the hub"
+                        : "Redstone Connector: the Redstone sheet's Out column sets each side's signal. Save to update it"
                         : shared.owner()
                         ? "Shared workbook, " + ShareProtocol.describeExpiry(shared.expiresAt())
                                 + ". Saving updates it for everyone"
@@ -804,7 +809,7 @@ public class SpreadsheetScreen extends Screen {
                 ).bounds(10, this.height - BOTTOM_ROW_OFFSET, 70, BUTTON_HEIGHT).build()
         );
 
-        if (shared != null) {
+        if (shared != null && !shared.isConnector()) {
             this.addRenderableWidget(
                     Button.builder(Component.literal("Copy item"), button ->
                             ShareClient.requestCopy(shared.id(), message -> status = message)
@@ -3996,6 +4001,14 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
+        if (shared.isConnector()) {
+            String error = ShareClient.saveConnector(workbookPath, shared.connector(), message -> status = message);
+            String label = ShareClient.linkedLabel(shared.connector());
+            status = error != null ? "Saved here, but the " + label + " wasn't updated: " + error
+                    : "Saved. Updating the " + label + "...";
+            return;
+        }
+
         if (!shared.owner()) {
             status = "Saved a copy to your workbooks: " + sharedCopyPath.getFileName();
             return;
@@ -5795,6 +5808,13 @@ public class SpreadsheetScreen extends Screen {
     public void removed() {
         saveViewState();
         restoreGuiScale();
+
+        // A hub or connector is edited by one player at a time: let the next one in.
+        // (Sent after any save's upload, so the server stores that first.)
+        if (shared != null && shared.isConnector()) {
+            ShareClient.closeConnector(shared.connector());
+        }
+
         super.removed();
     }
 

@@ -154,6 +154,12 @@ public class SharedWorkbookItem extends Item {
 
     // The owner and a live countdown to when the shared workbook expires.
     private static void addDetails(ItemStack stack, Consumer<Component> tooltip) {
+        // "Hold [W] for the guide" (see GuideScreen), last.
+        addInfo(stack, tooltip);
+        ClientHooks.guideTooltip.accept("sharing", tooltip);
+    }
+
+    private static void addInfo(ItemStack stack, Consumer<Component> tooltip) {
         CompoundTag tag = tagOf(stack);
 
         if (tag == null) {

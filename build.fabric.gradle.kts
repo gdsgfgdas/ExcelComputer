@@ -62,6 +62,11 @@ val bundledLibraries = listOf(
     }
 }
 
+// The parts of POI the mod never uses (Word, PowerPoint, Visio...) are cut out of
+// these nested jars once the mod jar is built (see gradle/poi-trim.txt, PoiTrim).
+val poiTrimFile = rootProject.file("gradle/poi-trim.txt")
+val trimmedLibraries = setOf("poi-ooxml", "poi-ooxml-full")
+
 dependencies {
     minecraft("com.mojang:minecraft:${sc.current.version}")
     // Applies Mojang Mappings on obfuscated versions
@@ -81,6 +86,14 @@ dependencies {
     }
 }
 
+loomx.modJar.configure {
+    val modJar = archiveFile
+    val list = poiTrimFile
+    val libraries = trimmedLibraries
+    inputs.file(list)
+    doLast { PoiTrim.trimNestedJars(modJar.get().asFile, list, libraries) }
+}
+
 loom {
     fabricModJsonPath = rootProject.file("src/main/resources/fabric.mod.json") // Useful for interface injection
 
@@ -98,6 +111,12 @@ loom {
     // without sharing log files and settings.
     runConfigs.named("server") {
         runDirectory = rootProject.file("run/${project.name}-server")
+    }
+    // The same player every launch ("Dev", like the NeoForge and Forge dev clients).
+    // Otherwise Fabric picks a random PlayerNNN each time, so anything the mod keeps
+    // per player (a player's Logistics Hubs, which hubs they own) seems to vanish.
+    runConfigs.named("client") {
+        programArgs("--username", "Dev")
     }
 }
 
@@ -160,6 +179,15 @@ tasks {
         }
 
         exclude("META-INF/neoforge.mods.toml", "META-INF/mods.toml", "pack.mcmeta")
+
+        // The Redstone Connector is hidden until it is finished (see REDSTONE_CONNECTOR in
+        // ExcelComputer.java): its recipe, loot table, model and texture stay out too.
+        val redstoneConnector = rootProject.file("src/main/java/io/github/reverendbrown/excelcomputer/ExcelComputer.java")
+            .readText().contains("REDSTONE_CONNECTOR = true")
+        inputs.property("redstoneConnector", redstoneConnector)
+        if (!redstoneConnector) {
+            exclude("**/redstone_connector.json", "**/redstone_connector.png")
+        }
     }
 
     // Includes the license file in the built mod

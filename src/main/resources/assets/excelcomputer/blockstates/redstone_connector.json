@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "excelcomputer:block/redstone_connector"
+    }
+  }
+}

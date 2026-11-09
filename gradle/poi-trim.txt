@@ -1,0 +1,35 @@
+# Parts of Apache POI left out of the mod jar (read by every build.*.gradle.kts).
+# The mod only reads and writes .xlsx (and .csv), so the Word, PowerPoint and
+# Visio parts and digital signatures are dead weight (about 4 MB of the jar).
+#
+# One folder per line, as a path inside the jars. Each folder is removed together
+# with xmlbeans' name index for it (org/apache/poi/schemas/ooxml/javaname/<folder>).
+#
+# Keep org/apache/poi/xwpf (Word): POIXMLDocumentPart.read uses XWPFRelation
+# while opening ANY workbook, and that class links the other XWPF classes.
+# Without the Word schemas below those still load fine; only Word files need them.
+#
+# Tested 2026-11-08 by opening, reading, recalculating, saving and reopening
+# Excel-made workbooks, the mod's own and hub workbooks, and a generated one with
+# comments, a picture, a chart, a table, an autofilter and conditional formatting:
+# same results as the full libraries. Re-test like that before adding to this list.
+
+# POI code for PowerPoint, Visio and signatures
+org/apache/poi/xslf
+org/apache/poi/xdgf
+org/apache/poi/poifs/crypt/dsig
+
+# XML schema classes (poi-ooxml-full) for Word, PowerPoint, Visio, SmartArt,
+# equations, bibliographies and signatures
+org/openxmlformats/schemas/wordprocessingml
+org/openxmlformats/schemas/presentationml
+org/openxmlformats/schemas/drawingml/x2006/wordprocessingDrawing
+org/openxmlformats/schemas/drawingml/x2006/lockedCanvas
+org/openxmlformats/schemas/drawingml/x2006/diagram
+org/openxmlformats/schemas/officeDocument/x2006/math
+org/openxmlformats/schemas/officeDocument/x2006/bibliography
+com/microsoft/schemas/office/visio
+com/microsoft/schemas/office/word/x2012
+com/microsoft/schemas/office/drawing/x2008/diagram
+org/etsi
+org/w3/x2000/x09

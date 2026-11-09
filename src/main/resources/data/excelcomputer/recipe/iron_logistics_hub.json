@@ -1,0 +1,18 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "MEM",
+    "MCM",
+    "MMM"
+  ],
+  "key": {
+    "M": "minecraft:iron_ingot",
+    "E": "minecraft:ender_pearl",
+    "C": "excelcomputer:excel_computer"
+  },
+  "result": {
+    "id": "excelcomputer:iron_logistics_hub",
+    "count": 1
+  }
+}
