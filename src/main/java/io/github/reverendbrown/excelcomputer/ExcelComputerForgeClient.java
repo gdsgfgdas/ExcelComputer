@@ -7,8 +7,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.InterModComms;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
+import net.minecraftforge.fml.event.lifecycle.InterModEnqueueEvent;
 
 // Registered for the client only (never on a dedicated server).
 @Mod.EventBusSubscriber(
@@ -18,7 +20,14 @@ import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 )
 public class ExcelComputerForgeClient {
     @SubscribeEvent
+    public static void onInterModEnqueue(InterModEnqueueEvent event) {
+        InterModComms.sendTo(ClientHooks.DARK_MODE_MOD, ClientHooks.DARK_MODE_BLACKLIST,
+                () -> ClientHooks.DARK_MODE_EXEMPT);
+    }
+
+    @SubscribeEvent
     public static void onClientSetup(FMLClientSetupEvent event) {
+        ClientHooks.darkModeEverywhere = net.minecraftforge.fml.ModList.get().isLoaded(ClientHooks.DARK_MODE_MOD);
         ClientHooks.openWorkbookPicker = () ->
                 Minecraft.getInstance().setScreen(new WorkbookPickerScreen());
         ClientHooks.openSharedWorkbook = ShareClient::openShared;

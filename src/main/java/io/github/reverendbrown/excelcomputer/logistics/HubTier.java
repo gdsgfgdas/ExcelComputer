@@ -5,26 +5,28 @@ package io.github.reverendbrown.excelcomputer.logistics;
  * cycle, runs its workbook more often and can use more inventories.
  */
 public enum HubTier {
-    //    id                         label                       range  items  ticks  inventories  other dimensions
-    COPPER("copper_logistics_hub", "Copper Logistics Hub", 16, 8, 40, 4, false),
-    IRON("iron_logistics_hub", "Iron Logistics Hub", 32, 32, 20, 8, false),
-    DIAMOND("diamond_logistics_hub", "Diamond Logistics Hub", 64, 128, 10, 16, false),
-    NETHERITE("netherite_logistics_hub", "Netherite Logistics Hub", 128, 512, 5, 32, true);
+    //    id                         label                       range  items  fluid (mB)  ticks  inventories  other dimensions
+    COPPER("copper_logistics_hub", "Copper Logistics Hub", 16, 8, 1_000, 40, 4, false),
+    IRON("iron_logistics_hub", "Iron Logistics Hub", 32, 32, 4_000, 20, 8, false),
+    DIAMOND("diamond_logistics_hub", "Diamond Logistics Hub", 64, 128, 16_000, 10, 16, false),
+    NETHERITE("netherite_logistics_hub", "Netherite Logistics Hub", 128, 512, 64_000, 5, 32, true);
 
     private final String id;
     private final String label;
     private final int range;
     private final int itemsPerCycle;
+    private final int fluidPerCycle;
     private final int cycleTicks;
     private final int maxInventories;
     private final boolean otherDimensions;
 
-    HubTier(String id, String label, int range, int itemsPerCycle, int cycleTicks, int maxInventories,
-            boolean otherDimensions) {
+    HubTier(String id, String label, int range, int itemsPerCycle, int fluidPerCycle, int cycleTicks,
+            int maxInventories, boolean otherDimensions) {
         this.id = id;
         this.label = label;
         this.range = range;
         this.itemsPerCycle = itemsPerCycle;
+        this.fluidPerCycle = fluidPerCycle;
         this.cycleTicks = cycleTicks;
         this.maxInventories = maxInventories;
         this.otherDimensions = otherDimensions;
@@ -49,6 +51,11 @@ public enum HubTier {
         return itemsPerCycle;
     }
 
+    /** The most fluid (millibuckets) all the Transfers rows together move in one cycle. */
+    public int fluidPerCycle() {
+        return fluidPerCycle;
+    }
+
     /** Game ticks between cycles (20 ticks = 1 second). */
     public int cycleTicks() {
         return cycleTicks;
@@ -69,7 +76,8 @@ public enum HubTier {
                 ? Integer.toString(cycleTicks / 20)
                 : Double.toString(cycleTicks / 20.0);
 
-        return label + ": moves up to " + itemsPerCycle + " items every " + seconds + " s, reaches "
+        return label + ": moves up to " + itemsPerCycle + " items and " + fluidPerCycle / 1000
+                + " buckets every " + seconds + " s, reaches "
                 + range + " blocks, holds " + maxInventories + " inventories"
                 + (otherDimensions ? ", works across dimensions" : "");
     }

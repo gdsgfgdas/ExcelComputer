@@ -32,6 +32,9 @@ repositories {
     }
     strictMaven("https://www.cursemaven.com", "CurseForge", "curse.maven")
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
+    // Storage mods the Logistics Hubs can join (compile-only, see dependencies)
+    strictMaven("https://maven.creeperhost.net", "Refined Mods", "com.refinedmods.refinedstorage")
+    strictMaven("https://modmaven.dev", "ModMaven", "appeng")
 }
 
 // Minecraft 1.20.1 ships older libraries (for example commons-io 2.11), so it needs the
@@ -83,6 +86,17 @@ dependencies {
     for (library in bundledLibraries) {
         implementation(library)
         add("include", library)
+    }
+
+    // Refined Storage, where it exists for this version (deps.refinedstorage in
+    // stonecutter.properties.toml). Compile-only: the hubs use it when the player
+    // has it installed (see HubNetworks).
+    findProperty("deps.ae2")?.let {
+        modCompileOnly("appeng:appliedenergistics2-fabric:$it") { isTransitive = false }
+    }
+    findProperty("deps.refinedstorage")?.let {
+        modCompileOnly("com.refinedmods.refinedstorage:refinedstorage-fabric:$it") { isTransitive = false }
+        compileOnly("org.apiguardian:apiguardian-api:1.1.2") // annotations RS uses (silences warnings)
     }
 }
 

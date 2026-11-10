@@ -39,6 +39,15 @@ public final class ClientHooks {
     public static Runnable openGuide = () -> {
     };
 
+    // Dark Mode Everywhere (NeoForge/Forge; in ATM10) darkens screens with a shader and
+    // turns dark text white. Its IMC blacklist takes "class:method" substrings; our
+    // package keeps its shader off what this mod draws (the guide's pictures). It can't
+    // exempt text, so ColorPalette.cellTextColor works around that while it's loaded.
+    public static boolean darkModeEverywhere;
+    public static final String DARK_MODE_MOD = "darkmodeeverywhere";
+    public static final String DARK_MODE_BLACKLIST = "dme-shaderblacklist";
+    public static final String DARK_MODE_EXEMPT = "io.github.reverendbrown.excelcomputer.";
+
     private ClientHooks() {
     }
 }

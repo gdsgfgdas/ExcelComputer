@@ -31,6 +31,9 @@ repositories {
     }
     strictMaven("https://www.cursemaven.com", "CurseForge", "curse.maven")
     strictMaven("https://api.modrinth.com/maven", "Modrinth", "maven.modrinth")
+    // Storage mods the Logistics Hubs can join (compile-only, see dependencies)
+    strictMaven("https://maven.neoforged.net/releases", "AE2", "org.appliedenergistics")
+    strictMaven("https://maven.creeperhost.net", "Refined Mods", "com.refinedmods.refinedstorage")
 }
 
 // Apache POI (reads and writes .xlsx files) is shaded into the mod jar, and the
@@ -98,6 +101,17 @@ dependencies {
     // jar shades POI, so it has no module descriptor.)
     if (sc.current.parsed < "1.21.9") {
         add("additionalRuntimeClasspath", "commons-codec:commons-codec:1.16.0")
+    }
+
+    // Applied Energistics 2 and Refined Storage, where they exist for this version
+    // (deps.ae2 / deps.refinedstorage in stonecutter.properties.toml). Compile-only:
+    // the hubs use them when the player has them installed (see HubNetworks).
+    findProperty("deps.ae2")?.let {
+        compileOnly("org.appliedenergistics:appliedenergistics2:$it") { isTransitive = false }
+    }
+    findProperty("deps.refinedstorage")?.let {
+        compileOnly("com.refinedmods.refinedstorage:refinedstorage-neoforge:$it") { isTransitive = false }
+        compileOnly("org.apiguardian:apiguardian-api:1.1.2") // annotations RS uses (silences warnings)
     }
 }
 

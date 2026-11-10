@@ -3,6 +3,7 @@ package io.github.reverendbrown.excelcomputer.block;
 import io.github.reverendbrown.excelcomputer.ExcelComputer;
 //? if fabric {
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
+import net.fabricmc.fabric.api.object.builder.v1.block.entity.FabricBlockEntityTypeBuilder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.CreativeModeTabs;
@@ -18,7 +19,11 @@ import net.minecraft.world.level.material.PushReaction;
 import io.github.reverendbrown.excelcomputer.redstone.RedstoneConnectorBlock;
 import io.github.reverendbrown.excelcomputer.logistics.HubTier;
 import io.github.reverendbrown.excelcomputer.logistics.LogisticsHubBlock;
+import io.github.reverendbrown.excelcomputer.logistics.HubNetworks;
+import io.github.reverendbrown.excelcomputer.logistics.LogisticsHubBlockEntity;
 import net.minecraft.world.level.block.SoundType;
+import net.minecraft.world.level.block.entity.BlockEntityType;
+import java.util.Set;
 
 public class ModBlocks {
 
@@ -124,6 +129,17 @@ public class ModBlocks {
         }
     }
 
+    // The hubs' block entity, which makes them devices on AE2 / Refined Storage
+    // networks (see LogisticsHubBlockEntity). After the static block above, which creates the hubs.
+    public static final BlockEntityType<LogisticsHubBlockEntity> LOGISTICS_HUB_ENTITY =
+            //? if fabric && >=1.21.2 {
+            FabricBlockEntityTypeBuilder.create(HubNetworks::newEntity, LOGISTICS_HUBS).build();
+            //?} elif >=1.21.2 {
+            /*new BlockEntityType<>(HubNetworks::newEntity, Set.of(LOGISTICS_HUBS));
+            *///?} else {
+            /*BlockEntityType.Builder.of(HubNetworks::newEntity, LOGISTICS_HUBS).build(null);
+            *///?}
+
     //? if fabric {
     public static void initialize() {
         Registry.register(BuiltInRegistries.BLOCK, EXCEL_COMPUTER_KEY, EXCEL_COMPUTER);
@@ -139,6 +155,8 @@ public class ModBlocks {
             Registry.register(BuiltInRegistries.BLOCK, blockKey(tier.id()), LOGISTICS_HUBS[tier.ordinal()]);
             Registry.register(BuiltInRegistries.ITEM, itemKey(tier.id()), LOGISTICS_HUB_ITEMS[tier.ordinal()]);
         }
+
+        Registry.register(BuiltInRegistries.BLOCK_ENTITY_TYPE, ExcelComputer.id("logistics_hub"), LOGISTICS_HUB_ENTITY);
 
         ItemGroupEvents.modifyEntriesEvent(CreativeModeTabs.FUNCTIONAL_BLOCKS)
                 .register(entries -> entries.accept(EXCEL_COMPUTER_ITEM));

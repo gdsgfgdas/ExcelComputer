@@ -2,7 +2,7 @@
 mod.id = "excelcomputer"
 mod.name = "Excel on a Stick"
 mod.group = "io.github.reverendbrown.excelcomputer"
-mod.version = "2.0.0"
+mod.version = "2.0.1"
 
 deps.fabric_loader = "0.18.1"
 loomx.loom_version = "1.18-SNAPSHOT"
@@ -15,12 +15,18 @@ mod.mc_releases = ["1.20.1"]
 [fabric."1.20.1"]
 mod.mc_compat = "1.20.1"
 deps.fabric_api = "0.92.6+1.20.1"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled)
+deps.ae2 = "15.4.12"
 # This Fabric API build requires Fabric Loader 0.16.10 or later
 deps.fabric_loader = "0.16.10"
 
 [forge."1.20.1"]
 mod.mc_compat = "[1.20.1]"
 deps.forge_loader = "1.20.1-47.4.10"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled).
+# refinedstorage1 is the Modrinth version id of Refined Storage 1.12.4 (the old RS 1 API).
+deps.ae2 = "15.4.12"
+deps.refinedstorage1 = "ZITLFjjf"
 
 ["1.21.1"]
 # List of releases to be marked compatible on Modrinth/Curseforge
@@ -31,6 +37,8 @@ mod.mc_releases = ["1.21", "1.21.1"]
 # Mod compatibility range in fabric.mod.json
 mod.mc_compat = ">=1.21 <=1.21.1"
 deps.fabric_api = "0.116.17+1.21.1"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled)
+deps.refinedstorage = "2.0.9"
 # An older loader on 1.21.1, so players with older Fabric Loader installs can still run the mod
 deps.fabric_loader = "0.16.10"
 
@@ -48,6 +56,9 @@ deps.fabric_loader = "0.18.1"
 [neoforge."1.21.1"]
 mod.mc_compat = "[1.21, 1.21.1]"
 deps.neo_loader = "21.1.251"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled)
+deps.ae2 = "19.2.19"
+deps.refinedstorage = "2.0.9"
 
 
 [neoforge."1.21.10"]
@@ -63,11 +74,16 @@ mod.mc_releases = ["26.1.2"]
 mod.mc_compat = "26.1.2"
 deps.fabric_api = "0.148.0+26.1.2"
 deps.fabric_loader = "0.19.2"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled)
+deps.refinedstorage = "3.2.1"
 
 
 [neoforge."26.1.2"]
 mod.mc_compat = "[26.1,26.2)"
 deps.neo_loader = "26.1.2.43-beta"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled)
+deps.ae2 = "26.1.13-beta"
+deps.refinedstorage = "3.2.1"
 
 ["26.2"]
 mod.mc_releases = ["26.2"]
@@ -83,3 +99,5 @@ deps.fabric_loader = "0.19.2"
 [neoforge."26.2"]
 mod.mc_compat = "[26.2, 26.3)"
 deps.neo_loader = "26.2.0.88"
+# Optional storage mods the Logistics Hubs connect to (compile-only, not bundled; AE2 is an alpha here)
+deps.ae2 = "26.2.1-alpha"

@@ -45,6 +45,9 @@ public class ExcelComputerForge {
         modEventBus.addListener(ExcelComputerForge::register);
         modEventBus.addListener(ExcelComputerForge::addToCreativeTabs);
         registerNetworking();
+        io.github.reverendbrown.excelcomputer.logistics.HubNetworks.init();
+        modEventBus.addListener((net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent event) ->
+                event.enqueueWork(io.github.reverendbrown.excelcomputer.logistics.HubNetworks::onSetup));
 
         ExcelComputer.LOGGER.info("Columns and rows, delicious.");
     }
@@ -84,6 +87,9 @@ public class ExcelComputerForge {
                 }
             }
         });
+
+        event.register(Registries.BLOCK_ENTITY_TYPE, helper ->
+                helper.register(ExcelComputer.id("logistics_hub"), ModBlocks.LOGISTICS_HUB_ENTITY));
     }
 
     private static void addToCreativeTabs(BuildCreativeModeTabContentsEvent event) {

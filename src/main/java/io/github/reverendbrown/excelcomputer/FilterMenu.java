@@ -7,9 +7,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/** The filter list popup opened from a table header's arrow: tick the values to show. */
+/**
+ * The filter list popup opened from a table header's arrow: sort the table by
+ * the column, or tick the values to show.
+ */
 public final class FilterMenu {
-    public enum Result { NONE, APPLY, CANCEL }
+    public enum Result { NONE, APPLY, CANCEL, SORT_ASCENDING, SORT_DESCENDING }
 
     public static final int WIDTH = 190;
 
@@ -17,16 +20,28 @@ public final class FilterMenu {
     private static final int ROW = 16;
     private static final int VISIBLE_ROWS = 10;
     private static final int BUTTON_HEIGHT = 18;
-    private static final int HEIGHT = PAD + ROW + 4 + VISIBLE_ROWS * ROW + 6 + BUTTON_HEIGHT + PAD;
+    // The two sort rows and the divider under them.
+    private static final int SORT_HEIGHT = ROW * 2 + 7;
+    private static final int HEIGHT = PAD + SORT_HEIGHT + ROW + 4 + VISIBLE_ROWS * ROW + 6 + BUTTON_HEIGHT + PAD;
 
     private boolean open;
     private int x;
     private int y;
     private TableInfo table;
     private int columnOffset;
+    private boolean numeric;
     private List<String> values = List.of();
     private boolean[] checked = new boolean[0];
     private int scroll;
+
+    /** The sort labels, like Excel's: numbers sort Smallest to Largest, text A to Z. */
+    public static String sortLabel(boolean ascending, boolean numeric) {
+        if (numeric) {
+            return ascending ? "Sort Smallest to Largest" : "Sort Largest to Smallest";
+        }
+
+        return ascending ? "Sort A to Z" : "Sort Z to A";
+    }
 
     public boolean isOpen() {
         return open;
@@ -49,11 +64,13 @@ public final class FilterMenu {
             TableInfo table,
             int columnOffset,
             List<String> values,
-            Set<String> allowed
+            Set<String> allowed,
+            boolean numeric
     ) {
         this.open = true;
         this.table = table;
         this.columnOffset = columnOffset;
+        this.numeric = numeric;
         this.values = values;
         this.checked = new boolean[values.size()];
         this.scroll = 0;
@@ -111,8 +128,12 @@ public final class FilterMenu {
         return px >= left && px < left + width && py >= top && py < top + height;
     }
 
+    private int selectAllTop() {
+        return y + PAD + SORT_HEIGHT;
+    }
+
     private int listTop() {
-        return y + PAD + ROW + 4;
+        return selectAllTop() + ROW + 4;
     }
 
     private int buttonsTop() {
@@ -144,6 +165,14 @@ public final class FilterMenu {
         }
 
         if (inside(mouseX, mouseY, x + PAD, y + PAD, WIDTH - PAD * 2, ROW)) {
+            return Result.SORT_ASCENDING;
+        }
+
+        if (inside(mouseX, mouseY, x + PAD, y + PAD + ROW, WIDTH - PAD * 2, ROW)) {
+            return Result.SORT_DESCENDING;
+        }
+
+        if (inside(mouseX, mouseY, x + PAD, selectAllTop(), WIDTH - PAD * 2, ROW)) {
             boolean tickAll = !allChecked();
 
             for (int i = 0; i < checked.length; i++) {
@@ -225,8 +254,32 @@ public final class FilterMenu {
         graphics.fill(x - 1, y - 1, x + WIDTH + 1, y + HEIGHT + 1, 0xFF5F6368);
         graphics.fill(x, y, x + WIDTH, y + HEIGHT, 0xFF202124);
 
+        // Sorting, then a divider.
+        for (int i = 0; i < 2; i++) {
+            int rowY = y + PAD + i * ROW;
+
+            if (inside(mouseX, mouseY, x + PAD, rowY, WIDTH - PAD * 2, ROW)) {
+                graphics.fill(x + PAD, rowY, x + WIDTH - PAD, rowY + ROW, 0xFF3C4043);
+            }
+
+            // A small arrow: up for ascending, down for descending.
+            int arrowX = x + PAD + 6;
+            int arrowY = rowY + 4;
+
+            for (int step = 0; step < 4; step++) {
+                int line = i == 0 ? step : 3 - step;
+                graphics.fill(arrowX + 3 - line, arrowY + step * 2, arrowX + 4 + line, arrowY + step * 2 + 2,
+                        0xFF8AB4F8);
+            }
+
+            graphics.drawString(font, sortLabel(i == 0, numeric), x + PAD + 20, rowY + 4, 0xFFFFFFFF, false);
+        }
+
+        int dividerY = y + PAD + ROW * 2 + 3;
+        graphics.fill(x + PAD + 2, dividerY, x + WIDTH - PAD - 2, dividerY + 1, 0xFF5F6368);
+
         // (Select All)
-        int selectTop = y + PAD;
+        int selectTop = selectAllTop();
 
         if (inside(mouseX, mouseY, x + PAD, selectTop, WIDTH - PAD * 2, ROW)) {
             graphics.fill(x + PAD, selectTop, x + WIDTH - PAD, selectTop + ROW, 0xFF3C4043);

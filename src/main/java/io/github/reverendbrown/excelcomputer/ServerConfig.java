@@ -37,6 +37,8 @@ public final class ServerConfig {
     public static int hubSlowPauseSeconds = 30;
     /** A hub that had to wait moves up to this many cycles' worth of items at once to catch up. */
     public static int hubCatchUpCycles = 4;
+    /** Most items of a storage network (AE2, Refined Storage) a hub lists in its Stock sheet. */
+    public static int hubNetworkStockRows = 500;
 
     private ServerConfig() {
     }
@@ -61,6 +63,8 @@ public final class ServerConfig {
             hubSlowPauseSeconds=%d
             # A hub that had to wait moves up to this many cycles' worth of items at once.
             hubCatchUpCycles=%d
+            # Most kinds of items a hub lists in Stock for a storage network (AE2, Refined Storage), most common first.
+            hubNetworkStockRows=%d
             """;
 
     /** Reads the file from the config folder, creating it with the defaults if it's missing. */
@@ -72,7 +76,7 @@ public final class ServerConfig {
                 Files.createDirectories(file.getParent());
                 Files.writeString(file, TEMPLATE.formatted(maxHubsPerPlayer, hubWorkbookMaxKb,
                         hubWorkbookMaxUnpackedMb, hubWorkbookMaxCells, hubWorkbookMaxFormulas, hubTickBudgetMs,
-                        hubSlowCycleMs, hubSlowPauseSeconds, hubCatchUpCycles), StandardCharsets.UTF_8);
+                        hubSlowCycleMs, hubSlowPauseSeconds, hubCatchUpCycles, hubNetworkStockRows), StandardCharsets.UTF_8);
                 return;
             }
 
@@ -92,6 +96,7 @@ public final class ServerConfig {
             hubSlowCycleMs = read(properties, "hubSlowCycleMs", 250, 10, 60_000);
             hubSlowPauseSeconds = read(properties, "hubSlowPauseSeconds", 30, 1, 3600);
             hubCatchUpCycles = read(properties, "hubCatchUpCycles", 4, 1, 100);
+            hubNetworkStockRows = read(properties, "hubNetworkStockRows", 500, 0, 100_000);
         } catch (IOException | RuntimeException exception) {
             ExcelComputer.LOGGER.warn("Could not read {}, using the defaults: {}", file, exception.toString());
         }

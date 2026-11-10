@@ -21,6 +21,12 @@ stonecutter parameters {
     swaps["mod_version"] = "\"${properties.get<String>("mod.version")}\";"
     swaps["minecraft"] = "\"${node.metadata.version}\";"
     constants["release"] = properties.get<String>("mod.id") != "template"
+    // Storage mods the Logistics Hubs can join, where stonecutter.properties.toml lists
+    // a version for them (compile-only; see HubNetworks): `//? if ae2 {`, `//? if rs {`.
+    // rs is Refined Storage 2+; rs1 is the older Refined Storage 1 (Forge 1.20.1).
+    constants["ae2"] = properties.getOrNull<String>("deps.ae2") != null
+    constants["rs"] = properties.getOrNull<String>("deps.refinedstorage") != null
+    constants["rs1"] = properties.getOrNull<String>("deps.refinedstorage1") != null
     dependencies["fapi"] = properties.getOrNull<String>("deps.fabric_api") ?: "0"
 
     replacements {

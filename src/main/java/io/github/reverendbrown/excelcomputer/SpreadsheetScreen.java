@@ -226,6 +226,11 @@ public class SpreadsheetScreen extends Screen {
     private final CellMenu cellMenu = new CellMenu();
     private final MiniToolbar miniToolbar = buildMiniToolbar();
     private final FilterMenu filterMenu = new FilterMenu();
+    // The search bar for one table, and which of its rows match (bit 0 is the
+    // header row). Null when they need working out again (after any change).
+    private final TableSearchBar tableSearch = new TableSearchBar();
+    private java.util.BitSet searchMatches;
+    private int searchBottom;
     private int formatButtonX;
 
     // Borders: the dropdown, the preset the Borders button repeats, and the
@@ -290,7 +295,10 @@ public class SpreadsheetScreen extends Screen {
             TableChange table,
             // A conditional formatting change: the sheet's rules before and
             // after it. Null for every other edit.
-            RuleChange rules
+            RuleChange rules,
+            // A drawing change (Draw tab): the sheet's strokes before and after it.
+            // Null for every other edit.
+            InkChange ink
     ) {
         CellEdit(
                 int sheet,
@@ -300,7 +308,7 @@ public class SpreadsheetScreen extends Screen {
                 String newValue,
                 boolean chained
         ) {
-            this(sheet, row, column, previousValue, newValue, chained, -1, -1, false, null, null);
+            this(sheet, row, column, previousValue, newValue, chained, -1, -1, false, null, null, null);
         }
 
         CellEdit(
@@ -313,27 +321,41 @@ public class SpreadsheetScreen extends Screen {
                 int previousStyle,
                 int newStyle
         ) {
-            this(sheet, row, column, previousValue, newValue, chained, previousStyle, newStyle, false, null, null);
+            this(sheet, row, column, previousValue, newValue, chained, previousStyle, newStyle, false,
+                    null, null, null);
         }
 
         static CellEdit resize(int sheet, int row, int column, boolean chained, int previous, int updated) {
-            return new CellEdit(sheet, row, column, "", "", chained, previous, updated, true, null, null);
+            return new CellEdit(sheet, row, column, "", "", chained, previous, updated, true, null, null, null);
         }
 
         // row and column: the cell that undo/redo selects (the table's top-left corner).
         static CellEdit tableChange(int sheet, int row, int column, TableChange change) {
-            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, change, null);
+            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, change, null, null);
         }
 
         // row and column: the cell that undo/redo selects (the range's top-left corner).
         static CellEdit ruleChange(int sheet, int row, int column, RuleChange change) {
-            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, null, change);
+            return new CellEdit(sheet, row, column, "", "", false, -1, -1, false, null, change, null);
+        }
+
+        // A drawing change keeps the selection where it is (see selectAfterHistory).
+        static CellEdit inkChange(int sheet, InkChange change) {
+            return new CellEdit(sheet, 0, 0, "", "", false, -1, -1, false, null, null, change);
         }
 
         // What undo/redo reports, e.g. "Undid: adding a color scale".
         String description() {
-            return table != null ? table.description() : rules != null ? rules.description() : null;
+            return table != null ? table.description() : rules != null ? rules.description()
+                    : ink != null ? ink.description() : null;
         }
+    }
+
+    private record InkChange(
+            List<InkDrawings.Stroke> before,
+            List<InkDrawings.Stroke> after,
+            String description
+    ) {
     }
 
     private record TableChange(
@@ -487,8 +509,14 @@ public class SpreadsheetScreen extends Screen {
     private int rowHeight(int row) {
         int base = baseRowHeight(row);
 
-        // A row hidden by a filter takes no room.
-        return base == 0 ? 0 : Math.max(MIN_DRAWN_SIZE, (int) Math.round(base * zoomPercent / 100.0));
+        // A row hidden by a filter, or left out by the table search, takes no room.
+        return base == 0 || searchHides(row)
+                ? 0 : Math.max(MIN_DRAWN_SIZE, (int) Math.round(base * zoomPercent / 100.0));
+    }
+
+    // Hidden by a filter or by the table search: moving the selection skips it.
+    private boolean rowHidden(int row) {
+        return baseRowHeight(row) == 0 || searchHides(row);
     }
 
     // The column letters stay readable when zoomed far out.
@@ -606,21 +634,33 @@ public class SpreadsheetScreen extends Screen {
 
     // The bottom and right of the selection for actions on cells (clear,
     // copy, format, ...). Whole columns or rows stop at the last used row or
-    // column, like Excel, instead of touching a million empty cells.
+    // column, like Excel, instead of touching a million empty cells. So does
+    // any range that runs past both the data and the screen (e.g. Ctrl+Shift+Down
+    // from a filled cell to the bottom of the sheet): it stops at whichever is further.
     private int actionBottom() {
-        if (manager == null || !wholeColumnsSelected()) {
+        if (manager == null) {
             return rangeBottom();
         }
 
-        return Math.max(rangeTop(), Math.min(rangeBottom(), manager.getLastUsedRow(sheetIndex)));
+        if (wholeColumnsSelected()) {
+            return Math.max(rangeTop(), Math.min(rangeBottom(), manager.getLastUsedRow(sheetIndex)));
+        }
+
+        int limit = Math.max(manager.getLastUsedRow(sheetIndex), firstVisibleRow + visibleRows());
+        return Math.max(rangeTop(), Math.min(rangeBottom(), limit));
     }
 
     private int actionRight() {
-        if (manager == null || !wholeRowsSelected()) {
+        if (manager == null) {
             return rangeRight();
         }
 
-        return Math.max(rangeLeft(), Math.min(rangeRight(), manager.getLastUsedColumn(sheetIndex)));
+        if (wholeRowsSelected()) {
+            return Math.max(rangeLeft(), Math.min(rangeRight(), manager.getLastUsedColumn(sheetIndex)));
+        }
+
+        int limit = Math.max(manager.getLastUsedColumn(sheetIndex), firstVisibleColumn + visibleColumns());
+        return Math.max(rangeLeft(), Math.min(rangeRight(), limit));
     }
 
     // Selects whole columns, from the anchor column to the end column.
@@ -678,6 +718,8 @@ public class SpreadsheetScreen extends Screen {
     private void markDirty() {
         dirty = true;
         discardArmed = false;
+        // The cells may have changed, so the table search looks again.
+        searchMatches = null;
     }
 
     // ----- the window -----
@@ -843,6 +885,8 @@ public class SpreadsheetScreen extends Screen {
         }
 
         sheetIndex = newSheetIndex;
+        tableSearch.close();
+        searchMatches = null;
         selectedRow = 0;
         selectedColumn = 0;
         firstVisibleRow = 0;
@@ -1328,7 +1372,7 @@ public class SpreadsheetScreen extends Screen {
                         snapToPixel(y + textTop),
                         scale
                 );
-                graphics.drawString(this.font, text, 0, 0, textColor, false);
+                graphics.drawString(this.font, text, 0, 0, ColorPalette.cellTextColor(textColor), false);
 
                 // A blinking cursor where the next character goes.
                 if (editingHere && System.currentTimeMillis() / 500 % 2 == 0) {
@@ -1343,6 +1387,8 @@ public class SpreadsheetScreen extends Screen {
         }
 
         graphics.disableScissor();
+
+        renderInk(graphics);
 
         renderSheetBar(graphics, mouseX, mouseY);
 
@@ -1633,6 +1679,23 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // The table search box takes the keys while you type in it (Ctrl+S still saves).
+        if (tableSearch.isFocused() && !(ctrl && key == GLFW.GLFW_KEY_S)) {
+            if (ctrl && key == GLFW.GLFW_KEY_F) {
+                return true;
+            }
+
+            handleSearchResult(tableSearch.keyPressed(key, ctrl, shift,
+                    () -> this.minecraft.keyboardHandler.getClipboard()));
+            return true;
+        }
+
+        // Ctrl+F searches the table the selected cell is in.
+        if (ctrl && key == GLFW.GLFW_KEY_F && manager != null) {
+            openTableSearch();
+            return true;
+        }
+
         if (conditionalMenu.isOpen() && key == GLFW.GLFW_KEY_ESCAPE) {
             conditionalMenu.close();
             return true;
@@ -1654,6 +1717,13 @@ public class SpreadsheetScreen extends Screen {
             filterMenu.close();
             borderMenu.close();
             functionMenu.close();
+            return true;
+        }
+
+        // Escape ends a table search before it closes anything else.
+        if (tableSearch.isOpen() && key == GLFW.GLFW_KEY_ESCAPE
+                && (cellEditor == null || !cellEditor.isFocused())) {
+            closeTableSearch();
             return true;
         }
 
@@ -1818,6 +1888,30 @@ public class SpreadsheetScreen extends Screen {
             return false;
         }
 
+        // Ctrl+Arrow jumps to the edge of the data; with Shift it extends the selection there.
+        if (ctrl && manager != null) {
+            switch (key) {
+                case GLFW.GLFW_KEY_UP -> {
+                    jump(0, -1, shift);
+                    return true;
+                }
+                case GLFW.GLFW_KEY_DOWN -> {
+                    jump(0, 1, shift);
+                    return true;
+                }
+                case GLFW.GLFW_KEY_LEFT -> {
+                    jump(-1, 0, shift);
+                    return true;
+                }
+                case GLFW.GLFW_KEY_RIGHT -> {
+                    jump(1, 0, shift);
+                    return true;
+                }
+                default -> {
+                }
+            }
+        }
+
         switch (key) {
             case GLFW.GLFW_KEY_UP -> {
                 navigate(0, -1, shift);
@@ -1860,6 +1954,159 @@ public class SpreadsheetScreen extends Screen {
         } else {
             moveSelection(columnChange, rowChange);
         }
+    }
+
+    // ----- Ctrl+Arrow / Ctrl+Shift+Arrow, as in Excel -----
+    //
+    // From a cell, one step in the arrow's direction decides where it goes:
+    //  - the cell and the next one both hold something: to the last filled cell
+    //    before an empty one (the end of this block of data);
+    //  - otherwise: to the next filled cell, or the sheet's edge if there is none.
+    // Rows hidden by a filter are skipped. Ctrl+Arrow moves the active cell
+    // (and the range shrinks to it). Ctrl+Shift+Arrow keeps the active cell and
+    // moves the range's far corner, starting from that corner's row (or column)
+    // but looking at the cells in the active cell's column (or row), like Excel.
+    private void jump(int columnChange, int rowChange, boolean extend) {
+        commitPendingEdit();
+
+        if (extend) {
+            if (rowChange != 0) {
+                rangeEndRow = jumpRow(rangeEndRow, selectedColumn, rowChange);
+            } else {
+                rangeEndColumn = jumpColumn(rangeEndColumn, selectedRow, columnChange);
+            }
+
+            scrollCellIntoView(rangeEndRow, rangeEndColumn);
+            status = "Selected " + rangeRef(rangeTop(), rangeLeft(), rangeBottom(), rangeRight());
+            return;
+        }
+
+        if (rowChange != 0) {
+            selectedRow = jumpRow(selectedRow, selectedColumn, rowChange);
+        } else {
+            selectedColumn = jumpColumn(selectedColumn, selectedRow, columnChange);
+        }
+
+        collapseRange();
+        scrollSelectionIntoView();
+        refreshEditor();
+    }
+
+    private boolean filled(int row, int column) {
+        try {
+            return !manager.isCellEmpty(sheetIndex, row, column);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    // The next row in that direction that isn't hidden, or -1 past the sheet's edge.
+    private int nextVisibleRow(int row, int direction) {
+        for (int next = row + direction; next >= 0 && next <= LAST_ROW; next += direction) {
+            if (!rowHidden(next)) {
+                return next;
+            }
+        }
+
+        return -1;
+    }
+
+    // Where Ctrl+Up / Ctrl+Down goes from row start, looking at the cells in column.
+    private int jumpRow(int start, int column, int direction) {
+        int next = nextVisibleRow(start, direction);
+
+        if (next < 0) {
+            return start;
+        }
+
+        // Inside a block of data: to its last filled cell.
+        if (filled(start, column) && filled(next, column)) {
+            int row = next;
+
+            for (int after = nextVisibleRow(row, direction); after >= 0 && filled(after, column);
+                 after = nextVisibleRow(after, direction)) {
+                row = after;
+            }
+
+            return row;
+        }
+
+        // Otherwise: to the next filled cell, or the edge. Rows past the last
+        // used one are all empty, so those are passed over in one go.
+        int last = manager.getLastUsedRow(sheetIndex);
+        int row = next;
+
+        while (!filled(row, column)) {
+            if (direction > 0 && row > last) {
+                return lastVisibleRow(row);
+            }
+
+            if (direction < 0 && row > last + 1) {
+                int below = nextVisibleRow(Math.max(last, -1) + 2, -1);
+
+                if (below >= 0 && below < row) {
+                    row = below;
+                    continue;
+                }
+            }
+
+            int after = nextVisibleRow(row, direction);
+
+            if (after < 0) {
+                return row;
+            }
+
+            row = after;
+        }
+
+        return row;
+    }
+
+    // The sheet's last row that isn't hidden (rows past the data never are).
+    private int lastVisibleRow(int from) {
+        return baseRowHeight(LAST_ROW) != 0 ? LAST_ROW : Math.max(from, nextVisibleRow(LAST_ROW + 1, -1));
+    }
+
+    // Where Ctrl+Left / Ctrl+Right goes from column start, looking at the cells in row.
+    private int jumpColumn(int start, int row, int direction) {
+        int next = start + direction;
+
+        if (next < 0 || next > LAST_COLUMN) {
+            return start;
+        }
+
+        if (filled(row, start) && filled(row, next)) {
+            int column = next;
+
+            while (column + direction >= 0 && column + direction <= LAST_COLUMN
+                    && filled(row, column + direction)) {
+                column += direction;
+            }
+
+            return column;
+        }
+
+        int last = manager.getLastUsedColumn(sheetIndex);
+        int column = next;
+
+        while (!filled(row, column)) {
+            if (direction > 0 && column > last) {
+                return LAST_COLUMN;
+            }
+
+            if (direction < 0 && column > last + 1) {
+                column = last + 1;
+                continue;
+            }
+
+            if (column + direction < 0 || column + direction > LAST_COLUMN) {
+                return column;
+            }
+
+            column += direction;
+        }
+
+        return column;
     }
 
     private void extendSelection(int columnChange, int rowChange) {
@@ -2025,6 +2272,11 @@ public class SpreadsheetScreen extends Screen {
     // Moves the relative references in a formula, like Excel does when you
     // copy and paste it. $A$1 style (absolute) parts stay where they are.
     private static String shiftFormula(String formula, int rowDelta, int columnDelta) {
+        return shiftFormula(formula, rowDelta, columnDelta, -1);
+    }
+
+    // onlyRow >= 0: only references to that row move (see shiftReferences).
+    private static String shiftFormula(String formula, int rowDelta, int columnDelta, int onlyRow) {
         if (rowDelta == 0 && columnDelta == 0) {
             return formula;
         }
@@ -2045,7 +2297,7 @@ public class SpreadsheetScreen extends Screen {
                 }
             } else if (ch == '"' || ch == '\'') {
                 result.append(shiftReferences(
-                        segment.toString(), rowDelta, columnDelta
+                        segment.toString(), rowDelta, columnDelta, onlyRow
                 ));
                 segment.setLength(0);
                 result.append(ch);
@@ -2056,13 +2308,19 @@ public class SpreadsheetScreen extends Screen {
         }
 
         result.append(shiftReferences(
-                segment.toString(), rowDelta, columnDelta
+                segment.toString(), rowDelta, columnDelta, onlyRow
         ));
 
         return result.toString();
     }
 
     private static String shiftReferences(String text, int rowDelta, int columnDelta) {
+        return shiftReferences(text, rowDelta, columnDelta, -1);
+    }
+
+    // onlyRow >= 0: only references to that row move (sorting moves a row's
+    // own cells with it, but a SUM over other rows keeps pointing at them).
+    private static String shiftReferences(String text, int rowDelta, int columnDelta, int onlyRow) {
         Matcher matcher = CELL_REFERENCE.matcher(text);
         StringBuilder out = new StringBuilder();
 
@@ -2081,6 +2339,13 @@ public class SpreadsheetScreen extends Screen {
 
             int column = columnIndex(matcher.group(2));
             int row = Integer.parseInt(digits) - 1;
+
+            if (onlyRow >= 0 && row != onlyRow) {
+                matcher.appendReplacement(
+                        out, Matcher.quoteReplacement(matcher.group())
+                );
+                continue;
+            }
 
             if (!absoluteColumn) {
                 column += columnDelta;
@@ -2573,7 +2838,7 @@ public class SpreadsheetScreen extends Screen {
     private void selectAfterHistory(CellEdit last) {
         sheetIndex = last.sheet();
 
-        if (!last.size()) {
+        if (!last.size() && last.ink() == null) {
             selectedRow = last.row();
             selectedColumn = last.column();
             collapseRange();
@@ -2638,6 +2903,14 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        if (tableSearch.isFocused()) {
+            if (tableSearch.charTyped(characterEvent.codepoint())) {
+                handleSearchResult(TableSearchBar.Result.CHANGED);
+            }
+
+            return true;
+        }
+
         if (prepareTypedChar(characterEvent.codepoint())) {
             return cellEditor.charTyped(characterEvent);
         }
@@ -2653,6 +2926,14 @@ public class SpreadsheetScreen extends Screen {
 
         if (conditionalDialog != null) {
             conditionalDialog.charTyped(chr);
+            return true;
+        }
+
+        if (tableSearch.isFocused()) {
+            if (tableSearch.charTyped(chr)) {
+                handleSearchResult(TableSearchBar.Result.CHANGED);
+            }
+
             return true;
         }
 
@@ -3238,6 +3519,32 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // The table search bar sits over the grid. A click anywhere else takes
+        // the typing focus back to the sheet but keeps the search on.
+        // (Open popups are drawn over it and take their clicks first.)
+        boolean popupOpen = cellMenu.isOpen() || filterMenu.isOpen() || palette.isOpen()
+                || formatMenu.isOpen() || borderMenu.isOpen() || functionMenu.isOpen()
+                || pasteMenu.isOpen() || conditionalMenu.isOpen() || miniToolbar.isOpen()
+                || (groupPanel != null && groupPanel.isOpen());
+
+        if (tableSearch.isOpen() && !popupOpen) {
+            TableSearchBar.Result result = tableSearch.click(mouseX, mouseY);
+
+            if (result != TableSearchBar.Result.MISSED) {
+                if (result == TableSearchBar.Result.NONE) {
+                    // Typing goes to the search box, not the cell.
+                    commitPendingEdit();
+                    if (cellEditor != null) {
+                        cellEditor.setFocused(false);
+                    }
+                    this.setFocused(null);
+                }
+
+                handleSearchResult(result);
+                return true;
+            }
+        }
+
         // A collapsed ribbon group's dropdown. Like the right-click formatting
         // bar it stays open, so several formats can be applied; a list opened
         // from it (palette, borders, paste, number format) takes its place.
@@ -3372,6 +3679,11 @@ public class SpreadsheetScreen extends Screen {
 
             if (result != FilterMenu.Result.NONE) {
                 filterMenu.close();
+            }
+
+            if (result == FilterMenu.Result.SORT_ASCENDING || result == FilterMenu.Result.SORT_DESCENDING) {
+                sortTable(filterMenu.table(), filterMenu.columnOffset(),
+                        result == FilterMenu.Result.SORT_ASCENDING);
             }
 
             return true;
@@ -3585,6 +3897,12 @@ public class SpreadsheetScreen extends Screen {
             return true;
         }
 
+        // A drawing tool (Draw tab) draws or erases instead of selecting.
+        if (button == 0 && manager != null && inkTool != InkTool.SELECT && insideGrid(mouseX, mouseY)
+                && startInk(mouseX, mouseY)) {
+            return true;
+        }
+
         // Clicks on the grid are handled here, before the widgets.
         if (button == 0 && manager != null && insideGrid(mouseX, mouseY)) {
             int column = Math.max(0, columnAt(mouseX));
@@ -3664,6 +3982,16 @@ public class SpreadsheetScreen extends Screen {
     *///?}
 
     private boolean handleMouseDragged(double mouseX, double mouseY) {
+        if (inkPoints != null && manager != null) {
+            addInkPoint(mouseX, mouseY, false);
+            return true;
+        }
+
+        if (inkBeforeErase != null && manager != null) {
+            eraseInkAt(mouseX, mouseY);
+            return true;
+        }
+
         if (draggingScrollThumb && manager != null) {
             dragScrollThumb(mouseX);
             return true;
@@ -3760,6 +4088,11 @@ public class SpreadsheetScreen extends Screen {
     *///?}
 
     private boolean handleMouseReleased(int button) {
+        if (button == 0 && (inkPoints != null || inkBeforeErase != null) && manager != null) {
+            finishInk();
+            return true;
+        }
+
         if (button == 0 && draggingScrollThumb) {
             draggingScrollThumb = false;
             return true;
@@ -4423,6 +4756,11 @@ public class SpreadsheetScreen extends Screen {
         pasteMenu.close();
         borderMenu.close();
         ribbonTab = tab;
+        // The drawing tools only work while the Draw tab is open.
+        if (tab != TAB_DRAW) {
+            inkTool = InkTool.SELECT;
+        }
+
         rebuildWidgets();
     }
 
@@ -4458,8 +4796,461 @@ public class SpreadsheetScreen extends Screen {
             addHomeButtons();
         } else if (ribbonTab == TAB_INSERT) {
             addInsertButtons();
+        } else if (ribbonTab == TAB_DRAW) {
+            addDrawButtons();
         }
-        // The Draw tab has no buttons yet (see renderRibbonOverlay).
+    }
+
+    // ----- drawing (the Draw tab): pen, highlighter and eraser on the sheet -----
+    //
+    // Strokes are kept by InkDrawings in cell space (column + how far across it,
+    // row + how far down it), so they stay on the cells they were drawn over.
+
+    private enum InkTool { SELECT, PEN, HIGHLIGHTER, ERASER }
+
+    // Pen widths in pixels at 100% zoom (Thin, Medium, Thick); the highlighter is wider.
+    private static final float[] PEN_WIDTHS = {1, 2, 4};
+    private static final float[] HIGHLIGHTER_WIDTHS = {6, 10, 16};
+    private static final String[] WIDTH_NAMES = {"Thin", "Medium", "Thick"};
+    // A new point is only added once the mouse has moved this far (screen pixels).
+    private static final double INK_MIN_STEP = 1.5;
+    // How see-through the highlighter is on screen (alpha of 0xAARRGGBB).
+    private static final int HIGHLIGHTER_SCREEN_ALPHA = 0x66;
+
+    private InkTool inkTool = InkTool.SELECT;
+    private int inkPenColor = 0x000000;
+    private int highlighterColor = 0xFFFF00;
+    private int inkWidth = 1;
+    private int inkColorButtonX;
+    // The stroke being drawn (cell space), or null when not drawing.
+    private List<double[]> inkPoints;
+    private double inkLastX;
+    private double inkLastY;
+    // While erasing: the sheet's strokes before this drag (for one undo step).
+    private List<InkDrawings.Stroke> inkBeforeErase;
+
+    private void addDrawButtons() {
+        int start = 14;
+        int x = start;
+
+        addRibbonButton(x, 40, inkToolLabel("Select", InkTool.SELECT),
+                "Select cells again (stop drawing)", () -> setInkTool(InkTool.SELECT));
+        x += 42;
+        addRibbonButton(x, 30, inkToolLabel("Pen", InkTool.PEN),
+                "Draw on the sheet with the mouse", () -> setInkTool(InkTool.PEN));
+        x += 32;
+        addRibbonButton(x, 60, inkToolLabel("Highlighter", InkTool.HIGHLIGHTER),
+                "Draw see-through strokes over the cells", () -> setInkTool(InkTool.HIGHLIGHTER));
+        x += 62;
+        addRibbonButton(x, 44, inkToolLabel("Eraser", InkTool.ERASER),
+                "Click or drag over strokes to erase them", () -> setInkTool(InkTool.ERASER));
+        x += 44;
+
+        int next = endGroup("Tools", start, x);
+        start = next;
+        x = next;
+
+        inkColorButtonX = x;
+        addRibbonButton(x, 36, Component.literal("Color"),
+                "The color of the pen (or the highlighter, while it is chosen)", this::toggleInkPalette);
+        x += 38;
+        addRibbonButton(x, 46, Component.literal(WIDTH_NAMES[inkWidth]),
+                "How thick the strokes are (click to change)", this::cycleInkWidth);
+        x += 46;
+
+        next = endGroup("Pen", start, x);
+        start = next;
+        x = next;
+
+        addRibbonButton(x, 36, Component.literal("Clear"),
+                "Erase every drawing on this sheet", this::clearInk);
+        x += 36;
+
+        endGroup("Edit", start, x);
+    }
+
+    // The chosen tool's name is shown highlighted.
+    private Component inkToolLabel(String name, InkTool tool) {
+        return inkTool == tool
+                ? Component.literal(name).withStyle(ChatFormatting.YELLOW, ChatFormatting.UNDERLINE)
+                : Component.literal(name);
+    }
+
+    private void setInkTool(InkTool tool) {
+        if (tool != InkTool.SELECT && manager.ink() == null) {
+            status = "Drawings need an .xlsx workbook (a .csv file can't hold them)";
+            return;
+        }
+
+        if (!commitPendingEdit()) {
+            return;
+        }
+
+        palette.close();
+        inkTool = tool;
+        status = switch (tool) {
+            case SELECT -> "Selecting cells";
+            case PEN -> "Pen: drag on the sheet to draw";
+            case HIGHLIGHTER -> "Highlighter: drag over cells to highlight them";
+            case ERASER -> "Eraser: click or drag over a stroke to erase it";
+        };
+        rebuildWidgets();
+    }
+
+    private void toggleInkPalette() {
+        if (palette.isOpen() && palette.target() == ColorPalette.Target.INK) {
+            palette.close();
+        } else {
+            closePopups();
+            palette.open(ColorPalette.Target.INK, inkColorButtonX, RIBBON_ROW1_Y + BUTTON_HEIGHT + 2, this.width);
+        }
+    }
+
+    private void cycleInkWidth() {
+        inkWidth = (inkWidth + 1) % WIDTH_NAMES.length;
+        status = WIDTH_NAMES[inkWidth] + " strokes";
+        rebuildWidgets();
+    }
+
+    private void applyInkColor(int color) {
+        // "Automatic" (the top strip): black pen, yellow highlighter.
+        if (inkTool == InkTool.HIGHLIGHTER) {
+            highlighterColor = color >= 0 ? color : 0xFFFF00;
+            status = "Highlighter color set";
+        } else {
+            inkPenColor = color >= 0 ? color : 0x000000;
+            status = "Pen color set";
+        }
+    }
+
+    private int currentInkColor() {
+        return inkTool == InkTool.HIGHLIGHTER ? highlighterColor : inkPenColor;
+    }
+
+    private void clearInk() {
+        InkDrawings ink = manager.ink();
+
+        if (ink == null || ink.strokes(sheetIndex).isEmpty()) {
+            status = "No drawings on this sheet";
+            return;
+        }
+
+        List<InkDrawings.Stroke> before = new ArrayList<>(ink.strokes(sheetIndex));
+        ink.set(sheetIndex, List.of());
+        recordInk(before, "clearing the drawings");
+        status = "Cleared the drawings on this sheet";
+    }
+
+    // One undo step for a drawing change, from the strokes before it to how they are now.
+    private void recordInk(List<InkDrawings.Stroke> before, String description) {
+        undoHistory.push(CellEdit.inkChange(sheetIndex,
+                new InkChange(before, new ArrayList<>(manager.ink().strokes(sheetIndex)), description)));
+        redoHistory.clear();
+        markDirty();
+    }
+
+    // A click on the grid while a drawing tool is chosen.
+    private boolean startInk(double mouseX, double mouseY) {
+        if (manager.ink() == null) {
+            inkTool = InkTool.SELECT;
+            return false;
+        }
+
+        commitPendingEdit();
+
+        if (inkTool == InkTool.ERASER) {
+            inkBeforeErase = new ArrayList<>(manager.ink().strokes(sheetIndex));
+            eraseInkAt(mouseX, mouseY);
+        } else {
+            inkPoints = new ArrayList<>();
+            addInkPoint(mouseX, mouseY, true);
+        }
+
+        return true;
+    }
+
+    private void addInkPoint(double mouseX, double mouseY, boolean first) {
+        // Strokes stay inside the grid (drawing off its edge doesn't scroll).
+        double x = Math.max(GRID_X, Math.min(gridRight() - 1, mouseX));
+        double y = Math.max(GRID_Y + headerHeight(), Math.min(gridBottom() - 1, mouseY));
+
+        if (!first && Math.hypot(x - inkLastX, y - inkLastY) < INK_MIN_STEP) {
+            return;
+        }
+
+        inkLastX = x;
+        inkLastY = y;
+        inkPoints.add(new double[]{cellSpaceX(x), cellSpaceY(y)});
+    }
+
+    private void finishInk() {
+        if (inkPoints != null) {
+            List<double[]> points = inkPoints;
+            inkPoints = null;
+            double[] xs = new double[points.size()];
+            double[] ys = new double[points.size()];
+
+            for (int i = 0; i < points.size(); i++) {
+                xs[i] = points.get(i)[0];
+                ys[i] = points.get(i)[1];
+            }
+
+            boolean highlighter = inkTool == InkTool.HIGHLIGHTER;
+            List<InkDrawings.Stroke> before = new ArrayList<>(manager.ink().strokes(sheetIndex));
+            manager.ink().add(sheetIndex, new InkDrawings.Stroke(currentInkColor(),
+                    (highlighter ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS)[inkWidth], highlighter, xs, ys));
+            recordInk(before, highlighter ? "highlighting" : "drawing");
+        }
+
+        if (inkBeforeErase != null) {
+            List<InkDrawings.Stroke> before = inkBeforeErase;
+            inkBeforeErase = null;
+
+            if (before.size() != manager.ink().strokes(sheetIndex).size()) {
+                recordInk(before, "erasing");
+            }
+        }
+    }
+
+    // Erases every stroke that passes under the mouse.
+    private void eraseInkAt(double mouseX, double mouseY) {
+        InkDrawings ink = manager.ink();
+        List<InkDrawings.Stroke> hit = new ArrayList<>();
+
+        for (InkDrawings.Stroke stroke : ink.strokes(sheetIndex)) {
+            double reach = Math.max(4, stroke.width() * zoomPercent / 200.0 + 2);
+
+            if (strokeNear(stroke, mouseX, mouseY, reach)) {
+                hit.add(stroke);
+            }
+        }
+
+        for (InkDrawings.Stroke stroke : hit) {
+            ink.remove(sheetIndex, stroke);
+        }
+
+        if (!hit.isEmpty()) {
+            status = "Erased " + hit.size() + (hit.size() == 1 ? " stroke" : " strokes");
+        }
+    }
+
+    private boolean strokeNear(InkDrawings.Stroke stroke, double mouseX, double mouseY, double reach) {
+        double previousX = screenX(stroke.xs()[0]);
+        double previousY = screenY(stroke.ys()[0]);
+
+        if (stroke.size() == 1) {
+            return Math.hypot(mouseX - previousX, mouseY - previousY) <= reach;
+        }
+
+        for (int i = 1; i < stroke.size(); i++) {
+            double x = screenX(stroke.xs()[i]);
+            double y = screenY(stroke.ys()[i]);
+
+            if (distanceToSegment(mouseX, mouseY, previousX, previousY, x, y) <= reach) {
+                return true;
+            }
+
+            previousX = x;
+            previousY = y;
+        }
+
+        return false;
+    }
+
+    private static double distanceToSegment(double px, double py, double ax, double ay, double bx, double by) {
+        double dx = bx - ax;
+        double dy = by - ay;
+        double lengthSquared = dx * dx + dy * dy;
+        double t = lengthSquared == 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared));
+        return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    }
+
+    // ----- screen <-> cell space -----
+
+    // Screen x (inside the grid) to cell space: the column plus how far across it.
+    private double cellSpaceX(double mouseX) {
+        int column = Math.max(0, columnAt(mouseX));
+        int width = columnWidth(column);
+        return column + Math.max(0, Math.min(1, (mouseX - columnLeft(column)) / (double) width));
+    }
+
+    private double cellSpaceY(double mouseY) {
+        int row = Math.max(0, rowAt(mouseY));
+        int height = Math.max(1, rowHeight(row));
+        return row + Math.max(0, Math.min(1, (mouseY - rowTop(row)) / (double) height));
+    }
+
+    // Cell space to screen; also works for columns and rows scrolled out of view.
+    private double screenX(double cellX) {
+        int column = (int) Math.floor(cellX);
+        return edgeX(column) + (cellX - column) * columnWidth(column);
+    }
+
+    private double screenY(double cellY) {
+        int row = (int) Math.floor(cellY);
+        return edgeY(row) + (cellY - row) * rowHeight(row);
+    }
+
+    // Left edge of any column on screen (left of the grid for columns scrolled past).
+    private int edgeX(int column) {
+        if (column >= firstVisibleColumn) {
+            return columnLeft(column);
+        }
+
+        int x = GRID_X;
+
+        for (int c = column; c < firstVisibleColumn; c++) {
+            x -= columnWidth(c);
+        }
+
+        return x;
+    }
+
+    private int edgeY(int row) {
+        if (row >= firstVisibleRow) {
+            return rowTop(row);
+        }
+
+        int y = GRID_Y + headerHeight();
+
+        for (int r = row; r < firstVisibleRow; r++) {
+            y -= rowHeight(r);
+        }
+
+        return y;
+    }
+
+    // ----- drawing the strokes -----
+
+    // Draws the sheet's strokes and the one being drawn, over the cells.
+    private void renderInk(GuiGraphics graphics) {
+        InkDrawings ink = manager == null ? null : manager.ink();
+
+        if (ink == null) {
+            return;
+        }
+
+        List<InkDrawings.Stroke> strokes = ink.strokes(sheetIndex);
+
+        if (strokes.isEmpty() && inkPoints == null) {
+            return;
+        }
+
+        int lastColumn = firstVisibleColumn + visibleColumns() + 1;
+        int lastRow = firstVisibleRow + visibleRows() + 1;
+
+        beginOverlay(graphics);
+        enableWindowScissor(graphics, GRID_X, GRID_Y + headerHeight(), gridRight(), gridBottom());
+
+        for (InkDrawings.Stroke stroke : strokes) {
+            if (visible(stroke.xs(), stroke.ys(), lastColumn, lastRow)) {
+                renderStroke(graphics, stroke.xs(), stroke.ys(), stroke.color(), stroke.width(),
+                        stroke.highlighter());
+            }
+        }
+
+        if (inkPoints != null && !inkPoints.isEmpty()) {
+            double[] xs = new double[inkPoints.size()];
+            double[] ys = new double[inkPoints.size()];
+
+            for (int i = 0; i < inkPoints.size(); i++) {
+                xs[i] = inkPoints.get(i)[0];
+                ys[i] = inkPoints.get(i)[1];
+            }
+
+            boolean highlighter = inkTool == InkTool.HIGHLIGHTER;
+            renderStroke(graphics, xs, ys, currentInkColor(),
+                    (highlighter ? HIGHLIGHTER_WIDTHS : PEN_WIDTHS)[inkWidth], highlighter);
+        }
+
+        graphics.disableScissor();
+        endOverlay(graphics);
+    }
+
+    // Whether any part of a stroke can be on screen (strokes far off are skipped).
+    private boolean visible(double[] xs, double[] ys, int lastColumn, int lastRow) {
+        double minX = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+
+        for (int i = 0; i < xs.length; i++) {
+            minX = Math.min(minX, xs[i]);
+            maxX = Math.max(maxX, xs[i]);
+            minY = Math.min(minY, ys[i]);
+            maxY = Math.max(maxY, ys[i]);
+        }
+
+        return maxX >= firstVisibleColumn - 1 && minX <= lastColumn
+                && maxY >= firstVisibleRow - 1 && minY <= lastRow;
+    }
+
+    // A stroke as runs of 1-pixel strips across each segment: the strips don't
+    // overlap, so a see-through highlighter stays even.
+    private void renderStroke(GuiGraphics graphics, double[] xs, double[] ys, int color, float width,
+                              boolean highlighter) {
+        int argb = (highlighter ? HIGHLIGHTER_SCREEN_ALPHA << 24 : 0xFF000000) | (color & 0xFFFFFF);
+        int size = Math.max(1, Math.round(width * zoomPercent / 100f));
+        double previousX = screenX(xs[0]);
+        double previousY = screenY(ys[0]);
+
+        if (xs.length == 1) {
+            int x = (int) Math.round(previousX) - size / 2;
+            int y = (int) Math.round(previousY) - size / 2;
+            graphics.fill(x, y, x + size, y + size, argb);
+            return;
+        }
+
+        for (int i = 1; i < xs.length; i++) {
+            double x = screenX(xs[i]);
+            double y = screenY(ys[i]);
+            // Each segment leaves out its first pixel (the previous one drew it), except the first.
+            renderSegment(graphics, previousX, previousY, x, y, size, argb, i > 1);
+            previousX = x;
+            previousY = y;
+        }
+    }
+
+    private static void renderSegment(GuiGraphics graphics, double x0, double y0, double x1, double y1,
+                                      int size, int argb, boolean skipStart) {
+        int half = size / 2;
+
+        if (Math.abs(x1 - x0) >= Math.abs(y1 - y0)) {
+            int from = (int) Math.round(x0);
+            int to = (int) Math.round(x1);
+            int step = from <= to ? 1 : -1;
+
+            for (int x = skipStart && from != to ? from + step : from; ; x += step) {
+                double t = to == from ? 0 : (x - from) / (double) (to - from);
+                int y = (int) Math.round(y0 + (y1 - y0) * t) - half;
+                graphics.fill(x, y, x + 1, y + size, argb);
+
+                if (x == to) {
+                    break;
+                }
+            }
+        } else {
+            int from = (int) Math.round(y0);
+            int to = (int) Math.round(y1);
+            int step = from <= to ? 1 : -1;
+
+            // Shorter than a pixel after rounding: one strip.
+            if (from == to) {
+                int x = (int) Math.round(x0) - half;
+                graphics.fill(x, from, x + size, from + 1, argb);
+                return;
+            }
+
+            for (int y = skipStart ? from + step : from; ; y += step) {
+                double t = (y - from) / (double) (to - from);
+                int x = (int) Math.round(x0 + (x1 - x0) * t) - half;
+                graphics.fill(x, y, x + size, y + 1, argb);
+
+                if (y == to) {
+                    break;
+                }
+            }
+        }
     }
 
     private void addInsertButtons() {
@@ -4475,7 +5266,22 @@ public class SpreadsheetScreen extends Screen {
                 this::toggleFilter);
         x += 44;
 
-        endGroup("Tables", start, x);
+        x = endGroup("Tables", start, x);
+        start = x;
+
+        addRibbonButton(x, RIBBON_ROW1_Y, 96, Component.literal("Sort Ascending"),
+                "Sort the table by the selected column: Smallest to Largest (A to Z for text)",
+                () -> sortSelectedColumn(true));
+        addRibbonButton(x, RIBBON_ROW2_Y, 96, Component.literal("Sort Descending"),
+                "Sort the table by the selected column: Largest to Smallest (Z to A for text)",
+                () -> sortSelectedColumn(false));
+        x += 98;
+        addRibbonButton(x, 72, Component.literal("Search"),
+                "Search the selected table: only rows containing the text are shown (Ctrl+F)",
+                this::openTableSearch);
+        x += 72;
+
+        endGroup("Sort & Search", start, x);
     }
 
     // The Home tab's groups, left to right, like Excel's.
@@ -5125,6 +5931,9 @@ public class SpreadsheetScreen extends Screen {
                     besideX, popupY(rowY, FunctionMenu.HEIGHT), this.width);
             case TABLE -> toggleTable();
             case FILTER -> toggleFilter();
+            case SORT_ASCENDING -> sortSelectedColumn(true);
+            case SORT_DESCENDING -> sortSelectedColumn(false);
+            case SEARCH_TABLE -> openTableSearch();
         }
     }
 
@@ -5152,6 +5961,11 @@ public class SpreadsheetScreen extends Screen {
 
     // A color picked in the palette; NONE means "No fill" / "Automatic".
     private void applyPaletteColor(ColorPalette.Target target, int color) {
+        if (target == ColorPalette.Target.INK) {
+            applyInkColor(color);
+            return;
+        }
+
         if (target == ColorPalette.Target.BORDER) {
             // Like Excel, the line color is used by the next border you pick.
             penColor = color;
@@ -5295,7 +6109,11 @@ public class SpreadsheetScreen extends Screen {
 
     // Puts a value or formatting edit back (undo) or applies it again (redo).
     private void applyEdit(CellEdit edit, boolean forward) {
-        if (edit.rules() != null) {
+        if (edit.ink() != null) {
+            if (manager.ink() != null) {
+                manager.ink().set(edit.sheet(), forward ? edit.ink().after() : edit.ink().before());
+            }
+        } else if (edit.rules() != null) {
             manager.restoreConditionalState(edit.sheet(), forward ? edit.rules().after() : edit.rules().before());
         } else if (edit.table() != null) {
             manager.restoreTableState(edit.sheet(), forward ? edit.table().after() : edit.table().before());
@@ -5331,6 +6149,13 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
+        // Under the Draw tab's Color button: the color the next stroke gets.
+        if (ribbonTab == TAB_DRAW) {
+            int barY = RIBBON_ROW1_Y + BUTTON_HEIGHT - 3;
+            graphics.fill(inkColorButtonX + 4, barY, inkColorButtonX + 32, barY + 2,
+                    0xFF000000 | currentInkColor());
+        }
+
         // A collapsed group's extras are drawn by its dropdown instead.
         boolean fontShown = !collapsedGroups.contains(HomeGroup.FONT);
         boolean numberShown = !collapsedGroups.contains(HomeGroup.NUMBER);
@@ -5362,15 +6187,17 @@ public class SpreadsheetScreen extends Screen {
                     FormatMenu.nameOf(activeFormat().numberFormat()) + " v",
                     formatButtonX + 6, RIBBON_ROW1_Y + BUTTON_TEXT_Y, 0xFFFFFFFF
             );
-        } else if (ribbonTab == TAB_DRAW) {
-            graphics.drawString(
-                    this.font,
-                    "Draw tools are a work in progress. Check back in a future update!",
-                    16, RIBBON_ROW1_Y + BUTTON_TEXT_Y + 6, 0xFF9AA0A6
-            );
         }
 
         beginOverlay(graphics);
+
+        if (tableSearch.isOpen()) {
+            updateSearchCounts();
+            tableSearch.place(Math.max(GRID_X, gridRight() - TableSearchBar.WIDTH - 4),
+                    GRID_Y + headerHeight() + 3);
+            tableSearch.render(graphics, this.font, mouseX, mouseY);
+        }
+
         cellMenu.render(graphics, this.font, mouseX, mouseY);
         miniToolbar.render(graphics, this.font, mouseX, mouseY);
 
@@ -5532,13 +6359,13 @@ public class SpreadsheetScreen extends Screen {
     private int stepRow(int row, int change) {
         int target = Math.max(0, row + change);
 
-        if (change == 0 || baseRowHeight(target) != 0) {
+        if (change == 0 || !rowHidden(target)) {
             return target;
         }
 
         int direction = change > 0 ? 1 : -1;
 
-        for (int guard = 0; target >= 0 && guard < 1_048_576 && baseRowHeight(target) == 0; guard++) {
+        for (int guard = 0; target >= 0 && guard < 1_048_576 && rowHidden(target); guard++) {
             target += direction;
         }
 
@@ -5619,7 +6446,8 @@ public class SpreadsheetScreen extends Screen {
                     table,
                     offset,
                     manager.getDistinctValues(sheetIndex, table, offset, 500),
-                    state.active() ? state.allowed() : null
+                    state.active() ? state.allowed() : null,
+                    manager.isNumericColumn(sheetIndex, table, offset)
             );
         } catch (RuntimeException | LinkageError exception) {
             status = "Could not open the filter list: " + describe(exception);
@@ -5756,6 +6584,431 @@ public class SpreadsheetScreen extends Screen {
         } catch (RuntimeException | LinkageError exception) {
             status = "Could not change the filter: " + describe(exception);
         }
+    }
+
+    // ----- sorting tables -----
+
+    // Sort Ascending / Descending (ribbon and right-click menu): sorts the
+    // table the selected cell is in by the selected column.
+    private void sortSelectedColumn(boolean ascending) {
+        if (manager == null) {
+            return;
+        }
+
+        if (!commitPendingEdit()) {
+            return;
+        }
+
+        TableInfo table = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
+
+        if (table == null) {
+            status = manager.isCsv()
+                    ? "Tables need an .xlsx file, not a .csv"
+                    : "Select a cell in a table (or filter range) to sort it";
+            return;
+        }
+
+        sortTable(table, selectedColumn - table.left(), ascending);
+    }
+
+    // Numbers before text, text A to Z ignoring case; descending is the
+    // reverse. Blank cells always go last, like Excel.
+    private static int compareSortValues(Object a, Object b, boolean ascending) {
+        if (a == null || b == null) {
+            return a == null ? (b == null ? 0 : 1) : -1;
+        }
+
+        int result;
+
+        if (a instanceof Double first && b instanceof Double second) {
+            result = Double.compare(first, second);
+        } else if (a instanceof Double || b instanceof Double) {
+            result = a instanceof Double ? -1 : 1;
+        } else {
+            result = String.CASE_INSENSITIVE_ORDER.compare(a.toString(), b.toString());
+        }
+
+        return ascending ? result : -result;
+    }
+
+    // A range like B2:B6 (either end may have $).
+    private static final Pattern RANGE_REFERENCE = Pattern.compile(
+            "(?<![A-Za-z0-9_.])\\$?[A-Za-z]{1,3}\\$?(\\d+):\\$?[A-Za-z]{1,3}\\$?(\\d+)(?![A-Za-z0-9_(!])");
+
+    // Whether a row adds up the table's rows above it: one of its formulas
+    // uses a range over several of those rows, or a whole table column
+    // (Table1[Amount], but not Table1[@Amount], which is the row's own cell).
+    private boolean isTotalRow(TableInfo table, int row, int firstData) {
+        for (int column = table.left(); column <= table.right(); column++) {
+            String input = manager.getCellInput(sheetIndex, row, column);
+
+            if (input == null || !input.startsWith("=")) {
+                continue;
+            }
+
+            Matcher matcher = RANGE_REFERENCE.matcher(input);
+
+            while (matcher.find()) {
+                if (matcher.group(1).length() > 7 || matcher.group(2).length() > 7) {
+                    continue;
+                }
+
+                int from = Integer.parseInt(matcher.group(1)) - 1;
+                int to = Integer.parseInt(matcher.group(2)) - 1;
+                int low = Math.min(from, to);
+                int high = Math.max(from, to);
+
+                // Ends above this row: a running total like B$2:B5 in row 5 is ordinary data.
+                if (high > low && high < row && high >= firstData) {
+                    return true;
+                }
+            }
+
+            if (input.matches("(?s).*\\[(?!@|#This Row).*") && !input.contains("[@")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Sorts a table's rows (not its header) by one of its columns. Whole rows
+    // move: values, formulas (their relative references move with them, as in
+    // Excel) and formatting. Filters are applied again afterwards, and the
+    // whole sort is one undo step.
+    private void sortTable(TableInfo table, int columnOffset, boolean ascending) {
+        if (manager == null || table == null) {
+            return;
+        }
+
+        if (!commitPendingEdit()) {
+            return;
+        }
+
+        filterMenu.close();
+
+        int first = table.top() + 1;
+        int width = table.right() - table.left() + 1;
+        // Total rows at the bottom stay where they are: Excel's Total Row, and
+        // rows with a formula adding up the rows above (like =SUM(B2:B6)).
+        int lastData = table.bottom() - manager.getTotalsRowCount(sheetIndex, table);
+        int totalRows = table.bottom() - lastData;
+
+        while (lastData > first && isTotalRow(table, lastData, first)) {
+            lastData--;
+            totalRows++;
+        }
+
+        int count = lastData - first + 1;
+        int column = table.left() + columnOffset;
+        String name = table.isTable() ? table.name() : "the filter range";
+        boolean numeric = manager.isNumericColumn(sheetIndex, table, columnOffset);
+        String how = FilterMenu.sortLabel(ascending, numeric).replace("Sort ", "");
+
+        if (count < 2) {
+            status = "There is nothing to sort in " + name;
+            return;
+        }
+
+        try {
+            Object[] keys = new Object[count];
+            Integer[] order = new Integer[count];
+
+            for (int i = 0; i < count; i++) {
+                keys[i] = manager.getSortValue(sheetIndex, first + i, column);
+                order[i] = i;
+            }
+
+            // Arrays.sort keeps equal rows in their order.
+            java.util.Arrays.sort(order, (a, b) -> compareSortValues(keys[a], keys[b], ascending));
+
+            boolean moved = false;
+
+            for (int i = 0; i < count && !moved; i++) {
+                moved = order[i] != i;
+            }
+
+            if (!moved) {
+                status = name + " is already sorted " + how;
+                return;
+            }
+
+            // Everything is read before anything is written.
+            String[][] inputs = new String[count][width];
+            int[][] styles = new int[count][width];
+
+            for (int r = 0; r < count; r++) {
+                for (int c = 0; c < width; c++) {
+                    String input = manager.getCellInput(sheetIndex, first + r, table.left() + c);
+                    inputs[r][c] = input == null ? "" : input;
+                    styles[r][c] = manager.getCellStyleIndex(sheetIndex, first + r, table.left() + c);
+                }
+            }
+
+            WorkbookManager.TableState before = manager.captureTableState(
+                    sheetIndex, table.top(), table.left(), table.bottom(), table.right());
+            List<CellEdit> edits = new ArrayList<>();
+            int skipped = 0;
+
+            for (int r = 0; r < count; r++) {
+                int source = order[r];
+
+                if (source == r) {
+                    continue;
+                }
+
+                for (int c = 0; c < width; c++) {
+                    int row = first + r;
+                    int col = table.left() + c;
+                    String input = inputs[source][c];
+                    // The first edit starts the undo step when there is no table change before it.
+                    boolean chained = before != null || !edits.isEmpty();
+
+                    // Only references to the formula's own row move with it.
+                    if (input.startsWith("=")) {
+                        input = shiftFormula(input, r - source, 0, first + source);
+                    }
+
+                    try {
+                        if (!input.equals(inputs[r][c])) {
+                            int[] autoStyles = manager.setCellValueDeferred(sheetIndex, row, col, input);
+                            edits.add(new CellEdit(sheetIndex, row, col, inputs[r][c], input, chained));
+
+                            if (autoStyles != null) {
+                                edits.add(new CellEdit(sheetIndex, row, col, "", "", true,
+                                        autoStyles[0], autoStyles[1]));
+                            }
+                        }
+
+                        int current = manager.getCellStyleIndex(sheetIndex, row, col);
+
+                        if (!manager.isCsv() && current != styles[source][c]) {
+                            manager.setCellStyleIndex(sheetIndex, row, col, styles[source][c]);
+                            edits.add(new CellEdit(sheetIndex, row, col, "", "",
+                                    before != null || !edits.isEmpty(), current, styles[source][c]));
+                        }
+                    } catch (RuntimeException exception) {
+                        skipped++;
+                    }
+                }
+            }
+
+            manager.reapplyFilters(sheetIndex, table);
+            manager.recalculate();
+
+            if (before != null) {
+                WorkbookManager.TableState after = manager.captureTableState(
+                        sheetIndex, table.top(), table.left(), table.bottom(), table.right());
+                undoHistory.push(CellEdit.tableChange(sheetIndex, table.top(), column,
+                        new TableChange(before, after, "sorting " + name)));
+            }
+
+            for (CellEdit edit : edits) {
+                undoHistory.push(edit);
+            }
+
+            redoHistory.clear();
+            rowHeightCache.clear();
+            markDirty();
+            refreshEditor();
+
+            status = "Sorted " + name + " by column " + columnName(column)
+                    + ": " + how
+                    + (totalRows > 0 ? (totalRows == 1 ? " (the total row stays at the bottom)"
+                            : " (the " + totalRows + " total rows stay at the bottom)") : "")
+                    + (skipped > 0 ? " (" + skipped + " cells could not be moved)" : "");
+        } catch (RuntimeException | LinkageError exception) {
+            status = "Could not sort: " + describe(exception);
+        }
+    }
+
+    // ----- searching a table -----
+
+    // Ctrl+F, the Search button or Search Table: opens the search bar for the
+    // table the selected cell is in (or puts the typing back in it).
+    private void openTableSearch() {
+        if (manager == null) {
+            return;
+        }
+
+        if (!commitPendingEdit()) {
+            return;
+        }
+
+        TableInfo table = manager.tableAt(sheetIndex, selectedRow, selectedColumn);
+
+        if (table == null && !(tableSearch.isOpen() && tableSearch.sheet() == sheetIndex)) {
+            status = manager.isCsv()
+                    ? "Tables need an .xlsx file, not a .csv"
+                    : "Select a cell inside a table to search it";
+            return;
+        }
+
+        closePopups();
+
+        if (table != null) {
+            tableSearch.open(sheetIndex, table);
+        } else {
+            tableSearch.setFocused(true);
+        }
+
+        if (cellEditor != null) {
+            cellEditor.setFocused(false);
+        }
+
+        this.setFocused(null);
+        searchMatches = null;
+        status = "Type to search " + (table != null && table.isTable() ? table.name() : "the table")
+                + " (Enter: next match, Esc: stop searching)";
+    }
+
+    private void closeTableSearch() {
+        tableSearch.close();
+        searchMatches = null;
+        scrollSelectionIntoView();
+        status = "Showing every row again";
+    }
+
+    // The table being searched, or null when it's gone (or on another sheet).
+    private TableInfo searchedTable() {
+        if (manager == null || !tableSearch.isOpen() || tableSearch.sheet() != sheetIndex) {
+            return null;
+        }
+
+        TableInfo table = manager.tableAt(sheetIndex, tableSearch.top(), tableSearch.left());
+
+        return table != null && table.top() == tableSearch.top() && table.left() == tableSearch.left()
+                ? table : null;
+    }
+
+    private boolean cellMatches(int row, int column, String query) {
+        try {
+            return manager.getCellText(sheetIndex, row, column).toLowerCase(Locale.ROOT).contains(query);
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    // Which rows of the searched table have a cell containing the text
+    // (bit 0 is the header row, which always shows). Worked out again after changes.
+    private java.util.BitSet searchMatches() {
+        if (searchMatches != null) {
+            return searchMatches;
+        }
+
+        java.util.BitSet matches = new java.util.BitSet();
+        String query = tableSearch.query();
+        TableInfo table = searchedTable();
+        searchBottom = -1;
+
+        if (table != null && !query.isEmpty()) {
+            searchBottom = table.bottom();
+
+            for (int row = table.top() + 1; row <= table.bottom(); row++) {
+                for (int column = table.left(); column <= table.right(); column++) {
+                    if (cellMatches(row, column, query)) {
+                        matches.set(row - table.top());
+                        break;
+                    }
+                }
+            }
+        }
+
+        searchMatches = matches;
+        return matches;
+    }
+
+    // A row of the searched table that has no cell containing the text.
+    private boolean searchHides(int row) {
+        if (!tableSearch.isOpen() || tableSearch.sheet() != sheetIndex || row <= tableSearch.top()
+                || manager == null || tableSearch.query().isEmpty()) {
+            return false;
+        }
+
+        java.util.BitSet matches = searchMatches();
+
+        return row <= searchBottom && !matches.get(row - tableSearch.top());
+    }
+
+    private void updateSearchCounts() {
+        java.util.BitSet matches = searchMatches();
+
+        tableSearch.setCounts(matches.cardinality(), Math.max(0, searchBottom - tableSearch.top()));
+    }
+
+    private void handleSearchResult(TableSearchBar.Result result) {
+        switch (result) {
+            case CHANGED -> {
+                searchMatches = null;
+                String query = tableSearch.query();
+                TableInfo table = searchedTable();
+
+                if (query.isEmpty() || table == null) {
+                    status = "Type to search the table";
+                    return;
+                }
+
+                int found = searchMatches().cardinality();
+                status = found == 0
+                        ? "No rows contain \"" + query + "\""
+                        : found + (found == 1 ? " row contains" : " rows contain") + " \"" + query + "\"";
+
+                // The selected cell was left out: go to the first match (or the header).
+                if (rowHidden(selectedRow) && table.contains(selectedRow, selectedColumn)) {
+                    int next = searchMatches().nextSetBit(1);
+                    selectedRow = next > 0 ? table.top() + next : table.top();
+                    collapseRange();
+                    refreshEditor();
+                }
+
+                scrollSelectionIntoView();
+            }
+            case NEXT -> jumpToMatch(1);
+            case PREVIOUS -> jumpToMatch(-1);
+            case CLOSE -> closeTableSearch();
+            default -> {
+            }
+        }
+    }
+
+    // Enter / Shift+Enter in the search box: selects the next (or previous)
+    // cell containing the text, going round the table.
+    private void jumpToMatch(int direction) {
+        TableInfo table = searchedTable();
+        String query = tableSearch.query();
+
+        if (table == null || query.isEmpty()) {
+            return;
+        }
+
+        int width = table.right() - table.left() + 1;
+        int total = (table.bottom() - table.top()) * width;
+        java.util.BitSet matches = searchMatches();
+        int start;
+
+        if (selectedRow > table.top() && table.contains(selectedRow, selectedColumn)) {
+            start = (selectedRow - table.top() - 1) * width + selectedColumn - table.left();
+        } else {
+            start = direction > 0 ? -1 : total;
+        }
+
+        for (int step = 1; step <= total; step++) {
+            int index = Math.floorMod(start + step * direction, total);
+            int row = table.top() + 1 + index / width;
+            int column = table.left() + index % width;
+
+            if (matches.get(row - table.top()) && cellMatches(row, column, query)) {
+                selectedRow = row;
+                selectedColumn = column;
+                collapseRange();
+                refreshEditor();
+                scrollSelectionIntoView();
+                status = "Found \"" + query + "\" in " + cellRef(row, column);
+                return;
+            }
+        }
+
+        status = "No cells contain \"" + query + "\"";
     }
 
     // ----- remembering the view between visits -----

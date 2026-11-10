@@ -18,6 +18,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.Fluid;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -50,6 +51,9 @@ import java.util.TreeMap;
 public final class LogisticsHubs {
     // A cycle that takes longer than this is reported in the log.
     private static final long SLOW_CYCLE_MS = 50;
+    // Fluids in Stock and in the Item column: "fluid:minecraft:water"; amounts in millibuckets.
+    private static final String FLUID_PREFIX = "fluid:";
+    private static final String MB = " mB";
 
     /** An inventory side registered to a hub; the name is the one used in the sheets. */
     private static final class Entry {
@@ -283,7 +287,7 @@ public final class LogisticsHubs {
         }
 
         if (ItemPorts.find(level, pos, side) == null) {
-            tell(player, "That block has no inventory on this side");
+            tell(player, "That block has no inventory or tank on this side");
             return;
         }
 
@@ -565,7 +569,7 @@ public final class LogisticsHubs {
                 status = "Not loaded";
             } else {
                 ItemPorts.Port port = ItemPorts.find(target, entry.pos, entry.side);
-                status = port == null ? "No inventory on the " + sideName(entry.side) + " side"
+                status = port == null ? "No inventory or tank on the " + sideName(entry.side) + " side"
                         : entry.sideProblem != null ? entry.sideProblem : "OK";
 
                 String block = entry.dimension + "@" + entry.pos.asLong();
@@ -592,11 +596,53 @@ public final class LogisticsHubs {
                     for (Map.Entry<String, Long> count : sorted.entrySet()) {
                         stock.add(new String[]{entry.name, count.getKey(), Long.toString(count.getValue())});
                     }
+
+                    // Fluids, in millibuckets, after the items: "fluid:minecraft:water".
+                    Map<Fluid, Long> fluids = new HashMap<>();
+                    port.countFluids(fluids);
+                    TreeMap<String, Long> sortedFluids = new TreeMap<>();
+
+                    for (Map.Entry<Fluid, Long> count : fluids.entrySet()) {
+                        sortedFluids.merge(FLUID_PREFIX + FluidPorts.id(count.getKey()), count.getValue(), Long::sum);
+                    }
+
+                    for (Map.Entry<String, Long> count : sortedFluids.entrySet()) {
+                        stock.add(new String[]{entry.name, count.getKey(), Long.toString(count.getValue())});
+                    }
                 }
             }
 
             statuses.add(status);
             seen.add(entry.name + "|" + status);
+        }
+
+        // Storage networks (AE2, Refined Storage) cabled to the hub: a row each, after the inventories.
+        List<String[]> networks = new ArrayList<>();
+
+        if (level.getBlockEntity(pos) instanceof LogisticsHubBlockEntity hub) {
+            for (NetworkLink link : hub.links()) {
+                if (!link.connected()) {
+                    continue;
+                }
+
+                String problem = link.problem();
+                String status = problem != null ? problem : "OK";
+
+                if (problem == null) {
+                    NetworkStorage storage = link.storage();
+                    FluidStore fluids = link.fluidStorage();
+                    ports.putIfAbsent(link.label().toLowerCase(Locale.ROOT),
+                            ItemPorts.network(level, pos, storage, fluids));
+                    int listed = networkStock(link.label(), storage, fluids, stock);
+
+                    if (listed >= 0) {
+                        status = "OK (Stock lists its " + listed + " most common items)";
+                    }
+                }
+
+                networks.add(new String[]{link.label(), status, link.modName()});
+                seen.add(link.label() + "|" + status);
+            }
         }
 
         for (String[] row : stock) {
@@ -609,14 +655,15 @@ public final class LogisticsHubs {
             return;
         }
 
-        writeInventories(workbook, sheets.inventories(), entries, statuses, level.getServer(), tier,
+        writeInventories(workbook, sheets.inventories(), entries, statuses, networks, level.getServer(), tier,
                 HubDirectory.name(key, tier));
         int previousStock = STOCK_ROWS.getOrDefault(key, workbook.getLastUsedRow(sheets.stock()));
         LogisticsSheets.writeStock(workbook, sheets.stock(), stock, previousStock);
         STOCK_ROWS.put(key, stock.size());
         workbook.recalculate();
 
-        long moved = runTransfers(workbook, sheets.transfers(), ports, (long) tier.itemsPerCycle() * cycles);
+        long moved = runTransfers(workbook, sheets.transfers(), ports, (long) tier.itemsPerCycle() * cycles,
+                (long) tier.fluidPerCycle() * cycles);
 
         // After moving items the counts are out of date: the next cycle runs in full.
         if (moved > 0) {
@@ -762,8 +809,42 @@ public final class LogisticsHubs {
         }
     }
 
+    // Adds a network's items to Stock: the most common ones (ServerConfig.hubNetworkStockRows),
+    // since a network can hold thousands of kinds. Returns how many were listed if
+    // that cut any off, or -1 if all were.
+    private static int networkStock(String name, NetworkStorage storage, FluidStore fluids, List<String[]> stock) {
+        Map<String, Long> counts = new HashMap<>();
+
+        for (NetworkStorage.Held held : storage.contents()) {
+            counts.merge(ItemFilter.id(held.item().getItem()), held.amount(), Long::sum);
+        }
+
+        if (fluids != null) {
+            for (FluidStore.Held held : fluids.contents()) {
+                counts.merge(FLUID_PREFIX + FluidPorts.id(held.fluid()), held.amount(), Long::sum);
+            }
+        }
+
+        List<Map.Entry<String, Long>> sorted = new ArrayList<>(counts.entrySet());
+        sorted.sort(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()));
+        int listed = Math.min(sorted.size(), ServerConfig.hubNetworkStockRows);
+        TreeMap<String, Long> kept = new TreeMap<>();
+
+        for (Map.Entry<String, Long> count : sorted.subList(0, listed)) {
+            kept.put(count.getKey(), count.getValue());
+        }
+
+        for (Map.Entry<String, Long> count : kept.entrySet()) {
+            stock.add(new String[]{name, count.getKey(), Long.toString(count.getValue())});
+        }
+
+        return listed < sorted.size() ? listed : -1;
+    }
+
+    // networks: name, status and mod of each storage network, written after the inventories.
     private static void writeInventories(WorkbookManager workbook, int sheet, List<Entry> entries,
-                                         List<String> statuses, MinecraftServer server, HubTier tier, String name) {
+                                         List<String> statuses, List<String[]> networks, MinecraftServer server,
+                                         HubTier tier, String name) {
         for (int i = 0; i < entries.size(); i++) {
             Entry entry = entries.get(i);
             int row = i + 1;
@@ -786,15 +867,32 @@ public final class LogisticsHubs {
             }
         }
 
+        // Networks have no position or side: those cells stay blank, so a network row
+        // never matches an inventory (see matchRows) and saving never unregisters one.
+        for (int i = 0; i < networks.size(); i++) {
+            String[] network = networks.get(i);
+            int row = entries.size() + i + 1;
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.NAME, network[0]);
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.X, "");
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.Y, "");
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.Z, "");
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.SIDE, "");
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.DIMENSION, "");
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.BLOCK, network[2]);
+            LogisticsSheets.put(workbook, sheet, row, LogisticsSheets.INVENTORY_STATUS, network[1]);
+        }
+
         // Rows left over from inventories that were removed.
         int last = workbook.getLastUsedRow(sheet);
-        LogisticsSheets.clearRows(workbook, sheet, entries.size() + 1, last + 1, LogisticsSheets.INVENTORY_STATUS + 1);
+        LogisticsSheets.clearRows(workbook, sheet, entries.size() + networks.size() + 1, last + 1,
+                LogisticsSheets.INVENTORY_STATUS + 1);
         LogisticsSheets.writeGuide(workbook, sheet, name, tier);
     }
 
-    // Works through the Transfers rows; returns how many items moved in all.
+    // Works through the Transfers rows; returns how many items and millibuckets moved in all.
+    // Items and fluids each have their own limit per cycle (budget, fluidBudget).
     private static long runTransfers(WorkbookManager workbook, int sheet, Map<String, ItemPorts.Port> ports,
-                                     long budget) {
+                                     long budget, long fluidBudget) {
         long total = 0;
 
         for (int row = 1; row <= workbook.getLastUsedRow(sheet); row++) {
@@ -809,12 +907,18 @@ public final class LogisticsHubs {
             String status;
 
             try {
-                status = transfer(workbook, sheet, row, from, to, items, ports, budget);
+                status = ItemFilter.isFluid(items)
+                        ? transferFluid(workbook, sheet, row, from, to, items, ports, fluidBudget)
+                        : transfer(workbook, sheet, row, from, to, items, ports, budget);
             } catch (ItemFilter.BadFilter exception) {
                 status = exception.getMessage();
             }
 
-            if (status.startsWith("Moved ")) {
+            if (status.startsWith("Moved ") && status.endsWith(MB)) {
+                long moved = Long.parseLong(status.substring("Moved ".length(), status.length() - MB.length()));
+                fluidBudget -= moved;
+                total += moved;
+            } else if (status.startsWith("Moved ")) {
                 long moved = Long.parseLong(status.substring("Moved ".length()));
                 budget -= moved;
                 total += moved;
@@ -851,7 +955,7 @@ public final class LogisticsHubs {
             return "Can't use " + (source == null ? from : to) + " (see the Inventories sheet)";
         }
 
-        ItemFilter filter = ItemFilter.parse(items);
+        ItemFilter<Item> filter = ItemFilter.parse(items);
 
         if (budget <= 0) {
             return "Waiting: the hub moved its limit this cycle";
@@ -877,6 +981,59 @@ public final class LogisticsHubs {
         return matching == 0
                 ? "Nothing to move"
                 : "Stuck: " + to + " is full or won't take these on its side, or " + from + " won't give them out";
+    }
+
+    // One Transfers row whose Item starts with "fluid:"; Amount is in millibuckets.
+    // Returns its status ("Moved 1000 mB", or why nothing moved).
+    private static String transferFluid(WorkbookManager workbook, int sheet, int row, String from, String to,
+                                        String items, Map<String, ItemPorts.Port> ports, long budget)
+            throws ItemFilter.BadFilter {
+        long amount = amount(workbook, sheet, row);
+
+        if (amount < 0) {
+            return "Amount must be a number (mB), ALL or blank";
+        }
+
+        if (amount == 0) {
+            return "Skipped (amount 0)";
+        }
+
+        if (from.isEmpty() || to.isEmpty()) {
+            return "Needs both From and To";
+        }
+
+        ItemPorts.Port source = ports.get(from.toLowerCase(Locale.ROOT));
+        ItemPorts.Port target = ports.get(to.toLowerCase(Locale.ROOT));
+
+        if (source == null || target == null) {
+            return "Can't use " + (source == null ? from : to) + " (see the Inventories sheet)";
+        }
+
+        ItemFilter<Fluid> filter = ItemFilter.parseFluids(items);
+
+        if (budget <= 0) {
+            return "Waiting: the hub moved its fluid limit this cycle";
+        }
+
+        long moved = ItemPorts.moveFluids(source, target, filter, Math.min(amount, budget));
+
+        if (moved > 0) {
+            return "Moved " + moved + MB;
+        }
+
+        Map<Fluid, Long> counts = new HashMap<>();
+        source.countFluids(counts);
+        long matching = 0;
+
+        for (Map.Entry<Fluid, Long> count : counts.entrySet()) {
+            if (filter.test(count.getKey())) {
+                matching += count.getValue();
+            }
+        }
+
+        return matching == 0
+                ? "Nothing to move"
+                : "Stuck: " + to + " is full or has no tank on its side, or " + from + " won't give it out";
     }
 
     // The Amount cell: a number (rounded down), Long.MAX_VALUE for blank/ALL/TRUE,

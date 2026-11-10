@@ -5,7 +5,7 @@ import net.minecraft.client.gui.GuiGraphics;
 
 /** The color picker popup: Excel's theme colors (with their shades) and standard colors. */
 public final class ColorPalette {
-    public enum Target { FILL, TEXT, BORDER }
+    public enum Target { FILL, TEXT, BORDER, INK }
 
     /** The "No fill" / "Automatic" choice. */
     public static final int NONE = -1;
@@ -21,6 +21,44 @@ public final class ColorPalette {
     public static final int WIDTH = PAD * 2 + COLUMNS * SWATCH + (COLUMNS - 1) * GAP;
     public static final int HEIGHT =
             PAD + STRIP + 4 + THEME_ROWS * (SWATCH + GAP) + 4 + SWATCH + PAD;
+
+    /**
+     * The color to draw dark text in on a light background (the cells). Dark Mode
+     * Everywhere (NeoForge/Forge, e.g. in ATM10) repaints text white on any screen
+     * when its red, green and blue are all below 65. Its blacklist can't stop that
+     * (it always sees Minecraft's Font as the caller), but it leaves a color of
+     * exactly 0 alone, which Minecraft draws as opaque black. So with it installed,
+     * near-black text is drawn as 0 and other dark colors are lifted, keeping their
+     * hue, until their strongest channel is 65. Checked against its 1.21.1 code;
+     * from 1.21.6 Minecraft skips text with alpha 0, so the trick isn't used there.
+     */
+    public static int cellTextColor(int argb) {
+        //? if <1.21.6 {
+        /*if (!ClientHooks.darkModeEverywhere) {
+            return argb;
+        }
+
+        int red = (argb >> 16) & 0xFF;
+        int green = (argb >> 8) & 0xFF;
+        int blue = argb & 0xFF;
+        int strongest = Math.max(red, Math.max(green, blue));
+
+        if (strongest >= 65) {
+            return argb;
+        }
+        if (strongest < 40) {
+            return 0;
+        }
+
+        double lift = 65.0 / strongest;
+        return (argb & 0xFF000000)
+                | Math.min(255, (int) Math.round(red * lift)) << 16
+                | Math.min(255, (int) Math.round(green * lift)) << 8
+                | Math.min(255, (int) Math.round(blue * lift));
+        *///?} else {
+        return argb;
+        //?}
+    }
 
     private static final int[] THEME = {
             0xFFFFFF, 0x000000, 0xE7E6E6, 0x44546A, 0x4472C4,

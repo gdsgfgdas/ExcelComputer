@@ -8,6 +8,7 @@ import org.apache.poi.xssf.usermodel.XSSFEvaluationWorkbook;
 import org.apache.poi.ss.usermodel.BorderStyle;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.CellValue;
 import org.apache.poi.ss.usermodel.DataFormatter;
 import org.apache.poi.ss.usermodel.DateUtil;
 import org.apache.poi.ss.usermodel.FillPatternType;
@@ -76,6 +77,8 @@ public class WorkbookManager implements AutoCloseable {
 
     // Conditional formatting rules and how they color cells (null for a .csv file).
     private final ConditionalFormats conditional;
+    // Pen and highlighter drawings (the Draw tab); null for a .csv file.
+    private final InkDrawings ink;
 
     private WorkbookManager(Workbook workbook) {
         this.workbook = workbook;
@@ -86,6 +89,14 @@ public class WorkbookManager implements AutoCloseable {
         this.conditional = workbook instanceof XSSFWorkbook xssf
                 ? new ConditionalFormats(xssf, evaluator)
                 : null;
+        this.ink = workbook instanceof XSSFWorkbook xssf ? new InkDrawings(xssf) : null;
+    }
+
+    // ----- drawings (see InkDrawings) -----
+
+    /** The sheets' pen drawings, or null when the workbook can't hold any (a .csv file). */
+    public InkDrawings ink() {
+        return ink;
     }
 
     // ----- conditional formatting (see ConditionalFormats) -----
@@ -1190,6 +1201,104 @@ public class WorkbookManager implements AutoCloseable {
     }
 
     /**
+     * What a cell sorts by: its number (also for a formula that calculates to
+     * one), its text, or null when it is blank. Blanks always sort last.
+     */
+    public Object getSortValue(int sheetIndex, int rowIndex, int columnIndex) {
+        String text = getCellText(sheetIndex, rowIndex, columnIndex);
+
+        if (csvMode) {
+            if (text.isBlank()) {
+                return null;
+            }
+
+            String plain = text.replace(",", "").replace("$", "").replace("%", "").trim();
+            return NUMBER.matcher(plain).matches() ? (Object) Double.parseDouble(plain) : text;
+        }
+
+        Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
+
+        if (cell == null) {
+            return null;
+        }
+
+        try {
+            CellType type = cell.getCellType();
+
+            if (type == CellType.FORMULA) {
+                CellValue value = evaluator.evaluate(cell);
+
+                if (value == null) {
+                    return null;
+                }
+
+                type = value.getCellType();
+
+                if (type == CellType.NUMERIC) {
+                    return value.getNumberValue();
+                }
+            } else if (type == CellType.NUMERIC) {
+                return cell.getNumericCellValue();
+            }
+
+            if (type == CellType.BLANK) {
+                return null;
+            }
+        } catch (RuntimeException exception) {
+            // Sorts by the text it shows (an error like #VALUE!).
+        }
+
+        return text.isEmpty() ? null : text;
+    }
+
+    /** Whether a table column holds mostly numbers (it sorts Smallest to Largest, not A to Z). */
+    public boolean isNumericColumn(int sheetIndex, TableInfo info, int columnOffset) {
+        int numbers = 0;
+        int texts = 0;
+        int column = info.left() + columnOffset;
+
+        for (int row = info.top() + 1; row <= info.bottom() && numbers + texts < 500; row++) {
+            Object value = getSortValue(sheetIndex, row, column);
+
+            if (value instanceof Double) {
+                numbers++;
+            } else if (value != null) {
+                texts++;
+            }
+        }
+
+        return numbers > 0 && numbers >= texts;
+    }
+
+    /** How many Total Rows (Excel's Table Design > Total Row) a table has at its bottom. */
+    public int getTotalsRowCount(int sheetIndex, TableInfo info) {
+        if (csvMode || !info.isTable()) {
+            return 0;
+        }
+
+        for (XSSFTable table : ((XSSFSheet) workbook.getSheetAt(sheetIndex)).getTables()) {
+            if (info.name().equals(table.getName())) {
+                return (int) Math.max(0, table.getCTTable().getTotalsRowCount());
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Hides the rows the table's filters leave out again (after its rows were
+     * sorted, for example). Does nothing when it has no filter buttons.
+     */
+    public void reapplyFilters(int sheetIndex, TableInfo info) {
+        if (csvMode || autoFilterOf(sheetIndex, info) == null) {
+            return;
+        }
+
+        applyRowVisibility(sheetIndex, info);
+        tableCache.remove(sheetIndex);
+    }
+
+    /**
      * Sets which values one column shows (null shows all of them) and hides the
      * table rows that do not match any column's filter.
      */
@@ -1749,6 +1858,25 @@ public class WorkbookManager implements AutoCloseable {
     /**
      * The last column that has any cells (0-based), or -1 for an empty sheet.
      */
+    /**
+     * Whether a cell holds nothing, as Ctrl+Arrow sees it: no value and no
+     * formula (a formula showing "" still counts). Formatting alone doesn't count.
+     */
+    public boolean isCellEmpty(int sheetIndex, int rowIndex, int columnIndex) {
+        if (csvMode) {
+            return getCsvCell(sheetIndex, rowIndex, columnIndex).isEmpty();
+        }
+
+        Cell cell = findCell(sheetIndex, rowIndex, columnIndex);
+
+        if (cell == null) {
+            return true;
+        }
+
+        CellType type = cell.getCellType();
+        return type == CellType.BLANK || type == CellType.STRING && cell.getStringCellValue().isEmpty();
+    }
+
     public int getLastUsedColumn(int sheetIndex) {
         int last = -1;
 
@@ -2375,6 +2503,10 @@ public class WorkbookManager implements AutoCloseable {
         Path temp = path.resolveSibling(path.getFileName() + ".tmp");
 
         try (OutputStream output = Files.newOutputStream(temp)) {
+            if (ink != null) {
+                ink.writeChanges();
+            }
+
             workbook.write(output);
         } catch (IOException | RuntimeException exception) {
             Files.deleteIfExists(temp);

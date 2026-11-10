@@ -18,6 +18,18 @@ val requiredJava = when {
 
 val shadowBundle by configurations.creating
 
+repositories {
+    // Storage mods the Logistics Hubs can join (compile-only, see dependencies)
+    exclusiveContent {
+        forRepository { maven("https://modmaven.dev") { name = "ModMaven" } }
+        filter { includeGroup("appeng") }
+    }
+    exclusiveContent {
+        forRepository { maven("https://api.modrinth.com/maven") { name = "Modrinth" } }
+        filter { includeGroup("maven.modrinth") }
+    }
+}
+
 // Same libraries as the Fabric 1.20.1 build: POI 5.2.3 with xmlbeans 5.1.1.
 // Libraries Minecraft/Forge already provide (log4j, commons-io, commons-codec) are left out.
 val bundledLibraries = listOf(
@@ -69,6 +81,16 @@ dependencies {
     // Minecraft, the dedicated server does not, so the dev server gets it here.
     // (Only for runs: the mod jar shades POI, so it has no module descriptor.)
     add("additionalRuntimeClasspath", "commons-codec:commons-codec:1.15")
+
+    // Applied Energistics 2 and Refined Storage 1, where stonecutter.properties.toml lists
+    // them (deps.ae2 / deps.refinedstorage1). Compile-only, remapped from SRG names:
+    // the hubs use them when the player has them installed (see HubNetworks).
+    findProperty("deps.ae2")?.let {
+        add("modCompileOnly", "appeng:appliedenergistics2-forge:$it") { isTransitive = false }
+    }
+    findProperty("deps.refinedstorage1")?.let {
+        add("modCompileOnly", "maven.modrinth:refined-storage:$it") { isTransitive = false }
+    }
 }
 
 java {

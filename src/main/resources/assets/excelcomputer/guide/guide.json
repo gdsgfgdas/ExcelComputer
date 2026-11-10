@@ -13,9 +13,9 @@
           ]
         },
         {
-          "text": "Put an Excel Table on top of 2 sticks to make Excel on a Stick. Use it anywhere to open your workbooks without the table.",
+          "text": "Put an Excel Table at the top of a diagonal line of 2 sticks to make Excel on a Stick. Use it anywhere to open your workbooks without the table.",
           "frames": [
-            {"image": "start_3_craft_stick", "shot": "Crafting grid: Excel Table above 2 sticks, Excel on a Stick in the result slot."},
+            {"image": "start_3_craft_stick", "shot": "Crafting grid: Excel Table in the top right, 2 sticks going diagonally down to the bottom left, Excel on a Stick in the result slot."},
             {"image": "start_4_hold_stick", "shot": "First person, holding Excel on a Stick in the hand (outdoors, nothing else in view)."}
           ]
         },
@@ -134,7 +134,7 @@
       "title": "Adding inventories",
       "steps": [
         {
-          "text": "Hold Excel on a Stick, sneak and right-click the side of a chest, furnace, barrel or modded storage. It joins your active hub. Do it again to take it off.",
+          "text": "Hold Excel on a Stick, sneak and right-click the side of a chest, furnace, barrel or modded storage. It joins your active hub. Do it again to take it off. A storage controller (like Sophisticated Storage's) adds its whole storage network as one inventory. Tanks work the same way, for moving fluids.",
           "frames": [
             {"image": "inv_1_sneak_click", "shot": "Sneaking and right-clicking the side of a chest with the stick."},
             {"image": "inv_2_added", "shot": "The action bar right after: \"Added Chest 1 (North side) to ...\"."},
@@ -162,7 +162,7 @@
       "title": "Moving items",
       "steps": [
         {
-          "text": "Every cycle, each row of the Transfers sheet moves items From one inventory To another. Item says which items, Amount how many. Status tells you what happened.",
+          "text": "Every cycle, each row of the Transfers sheet moves items From one inventory To another. Item says which items, Amount how many. Status tells you what happened. For fluids, write fluid: in front (fluid:water, fluid:*) and give Amount in millibuckets: 1000 is a bucket.",
           "frames": [
             {"image": "tr_1_sheet", "shot": "The Transfers sheet with 2-3 filled rows and their Status column (\"Moved 8\", \"Nothing to move\")."}
           ]

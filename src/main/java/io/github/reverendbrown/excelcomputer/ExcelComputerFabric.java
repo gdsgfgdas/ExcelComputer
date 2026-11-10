@@ -21,6 +21,8 @@ public class ExcelComputerFabric implements ModInitializer {
     public void onInitialize() {
         ModBlocks.initialize();
         ModItems.initialize();
+        // Storage networks (Refined Storage) the hubs can be cabled to.
+        io.github.reverendbrown.excelcomputer.logistics.HubNetworks.init();
         registerNetworking();
         ExcelComputer.LOGGER.info("Columns and rows, delicious.");
     }

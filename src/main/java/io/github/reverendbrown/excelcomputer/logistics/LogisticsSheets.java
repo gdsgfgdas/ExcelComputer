@@ -61,7 +61,10 @@ public final class LogisticsSheets {
             "Several sides of one block: each is its own row to move items with, but Stock lists",
             "what the block holds once, under the first side's name (its Status says which).",
             "You can change the Name and Side columns; the game fills in the rest.",
-            "To remove an inventory, delete (or clear) its row and save."
+            "To remove an inventory, delete (or clear) its row and save.",
+            "Tanks work too: Stock lists fluids as fluid:<id>, in millibuckets (1000 = a bucket).",
+            "Applied Energistics 2 / Refined Storage: run a cable to the hub. Its network gets a row",
+            "(ME Network, RS Network) to use in Transfers like any inventory, while it's connected."
     };
     private static final int SIDE_WIDTH = 120;
 
@@ -120,6 +123,7 @@ public final class LogisticsSheets {
                     "From / To: names from the Inventories sheet.",
                     "Item: an id (minecraft:coal), a tag (#c:ingots), a wildcard (*_ingot) or * for anything.",
                     "    Separate several with commas. ! in front leaves items out: *, !minecraft:dirt",
+                    "    Fluids: fluid:water, fluid:#c:water or fluid:* (Amount in millibuckets, 1000 = a bucket).",
                     "Amount: the most to move per cycle, a number or a formula. Blank or ALL: as many as",
                     "    the hub allows. 0 or FALSE: skip the row this cycle.",
                     "Status: what happened in the last cycle (filled in by the game).",
@@ -192,8 +196,8 @@ public final class LogisticsSheets {
 
     /** A message for players under the Inventories notes (blank clears it), e.g. that the hub is paused. */
     static void writeNotice(WorkbookManager workbook, int sheet, String notice) {
-        // Below the notes (rows 0-9).
-        put(workbook, sheet, 10, INVENTORY_NOTES, notice);
+        // Below the notes.
+        put(workbook, sheet, INVENTORY_GUIDE.length, INVENTORY_NOTES, notice);
     }
 
     /** Clears the cells of rows [from, to) in columns [0, columns). */

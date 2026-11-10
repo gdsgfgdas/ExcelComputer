@@ -14,7 +14,10 @@ public final class CellMenu {
         NUMBER_FORMAT("Number Format", ">", false),
         INSERT_FUNCTION("Insert Function", ">", true),
         TABLE("Table", "", false),
-        FILTER("Filter", "", false);
+        FILTER("Filter", "", true),
+        SORT_ASCENDING("Sort Smallest to Largest", "", false),
+        SORT_DESCENDING("Sort Largest to Smallest", "", false),
+        SEARCH_TABLE("Search Table", "Ctrl+F", false);
 
         private final String label;
         private final String hint;
@@ -29,7 +32,7 @@ public final class CellMenu {
     }
 
     private static final Action[] ACTIONS = Action.values();
-    private static final int WIDTH = 120;
+    private static final int WIDTH = 150;
     private static final int ROW = 13;
     private static final int PAD = 3;
     private static final int DIVIDER = 5;

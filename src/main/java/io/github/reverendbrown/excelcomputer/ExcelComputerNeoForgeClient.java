@@ -7,7 +7,10 @@ import io.github.reverendbrown.excelcomputer.share.SharePayloads;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.InterModComms;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.event.lifecycle.InterModEnqueueEvent;
 //? if >=1.21.9 {
 import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 //?} else {
@@ -17,7 +20,11 @@ import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 // Runs only on the client (never on a dedicated server).
 @Mod(value = ExcelComputer.MOD_ID, dist = Dist.CLIENT)
 public class ExcelComputerNeoForgeClient {
-    public ExcelComputerNeoForgeClient() {
+    public ExcelComputerNeoForgeClient(IEventBus modBus) {
+        modBus.addListener((InterModEnqueueEvent event) -> InterModComms.sendTo(
+                ClientHooks.DARK_MODE_MOD, ClientHooks.DARK_MODE_BLACKLIST, () -> ClientHooks.DARK_MODE_EXEMPT));
+        ClientHooks.darkModeEverywhere = net.neoforged.fml.ModList.get().isLoaded(ClientHooks.DARK_MODE_MOD);
+
         ClientHooks.openWorkbookPicker = () ->
                 Minecraft.getInstance().setScreen(new WorkbookPickerScreen());
         ClientHooks.openSharedWorkbook = ShareClient::openShared;

@@ -2,6 +2,7 @@ package io.github.reverendbrown.excelcomputer;
 
 //? if neoforge {
 /*import io.github.reverendbrown.excelcomputer.block.ModBlocks;
+import io.github.reverendbrown.excelcomputer.logistics.HubNetworks;
 import io.github.reverendbrown.excelcomputer.logistics.HubTier;
 import io.github.reverendbrown.excelcomputer.item.ModItems;
 import io.github.reverendbrown.excelcomputer.share.ShareNetwork;
@@ -12,6 +13,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.item.CreativeModeTabs;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
 import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -24,6 +26,9 @@ public class ExcelComputerNeoForge {
         modEventBus.addListener(ExcelComputerNeoForge::register);
         modEventBus.addListener(ExcelComputerNeoForge::addToCreativeTabs);
         modEventBus.addListener(ExcelComputerNeoForge::registerPayloads);
+        // Storage networks (AE2, Refined Storage) find the hubs through capabilities.
+        HubNetworks.init();
+        modEventBus.addListener((RegisterCapabilitiesEvent event) -> HubNetworks.onRegisterCapabilities(event));
 
         ExcelComputer.LOGGER.info("Columns and rows, delicious.");
     }
@@ -63,6 +68,9 @@ public class ExcelComputerNeoForge {
                 }
             }
         });
+
+        event.register(Registries.BLOCK_ENTITY_TYPE, helper ->
+                helper.register(ExcelComputer.id("logistics_hub"), ModBlocks.LOGISTICS_HUB_ENTITY));
     }
 
     private static void addToCreativeTabs(BuildCreativeModeTabContentsEvent event) {

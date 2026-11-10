@@ -17,8 +17,13 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.EntityBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
+import io.github.reverendbrown.excelcomputer.block.ModBlocks;
 
 /**
  * A Logistics Hub: moves items between the inventories registered to it, as
@@ -27,8 +32,11 @@ import net.minecraft.world.phys.BlockHitResult;
  * <p>Right-clicking it opens its workbook (made by the server from a template
  * the first time) and makes it the hub the player's next sneak-right-clicked
  * inventories join. Whoever places it owns it.
+ *
+ * <p>Its block entity makes it a device on Applied Energistics 2 and Refined
+ * Storage networks when those mods are installed (see {@link HubNetworks}).
  */
-public class LogisticsHubBlock extends Block {
+public class LogisticsHubBlock extends Block implements EntityBlock {
     // How often a hub with no workbook checks whether one was linked.
     private static final int UNLINKED_TICKS = 100;
 
@@ -45,6 +53,24 @@ public class LogisticsHubBlock extends Block {
 
     public HubTier tier() {
         return tier;
+    }
+
+    // ----- the block entity: storage networks (AE2, Refined Storage) -----
+
+    @Override
+    public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+        return HubNetworks.newEntity(pos, state);
+    }
+
+    // Ticks only on the server, and only when a storage mod is installed (to pay its energy).
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(Level level, BlockState state,
+                                                                  BlockEntityType<T> type) {
+        if (level.isClientSide() || type != ModBlocks.LOGISTICS_HUB_ENTITY || !HubNetworks.any()) {
+            return null;
+        }
+
+        return (tickLevel, pos, tickState, entity) -> ((LogisticsHubBlockEntity) entity).serverTick();
     }
 
     // ----- right-click -----

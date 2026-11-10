@@ -310,8 +310,8 @@ public final class ConditionalDialog {
             if (option.fill() >= 0) {
                 graphics.fill(swatchLeft, top + 1, swatchLeft + 30, top + ROW - 1, 0xFF000000 | option.fill());
             }
-            graphics.drawString(font, "Aa", swatchLeft + 9, top + 2,
-                    0xFF000000 | (option.fontColor() >= 0 ? option.fontColor() : 0x202124), false);
+            graphics.drawString(font, "Aa", swatchLeft + 9, top + 2, ColorPalette.cellTextColor(
+                    0xFF000000 | (option.fontColor() >= 0 ? option.fontColor() : 0x202124)), false);
 
             graphics.drawString(font, option.label(), swatchLeft + 36, top + 2, 0xFFFFFFFF, false);
         }
