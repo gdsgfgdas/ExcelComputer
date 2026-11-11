@@ -9,6 +9,9 @@
   ],
   "license": "CC0-1.0",
   "environment": "*",
+  "mixins": [
+    "excelcomputer.mixins.json"
+  ],
   "entrypoints": {
     "main": [
       "io.github.reverendbrown.excelcomputer.ExcelComputerFabric"

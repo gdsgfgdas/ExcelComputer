@@ -4347,7 +4347,10 @@ public class SpreadsheetScreen extends Screen {
             return;
         }
 
-        String error = ShareClient.upload(workbookPath, shared.id(), message -> status = message);
+        // The item's map picture shows what the owner is looking at.
+        byte[] preview = io.github.reverendbrown.excelcomputer.share.SheetPreview.render(manager,
+                workbookPath.getFileName().toString(), sheetIndex, firstVisibleRow, firstVisibleColumn);
+        String error = ShareClient.upload(workbookPath, shared.id(), preview, message -> status = message);
         status = error != null ? "Saved here, but not shared: " + error : "Saved. Updating the shared copy...";
     }
 

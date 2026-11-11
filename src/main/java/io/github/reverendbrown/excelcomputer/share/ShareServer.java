@@ -64,6 +64,8 @@ public final class ShareServer {
         final BlockPos connector;
         final long startedAt = System.currentTimeMillis();
         int received;
+        // The sheet's picture for the item's map (see PreviewMaps), or null.
+        byte[] preview;
 
         Upload(int transfer, String name, int size, UUID target) {
             this(transfer, name, size, target, null);
@@ -79,9 +81,14 @@ public final class ShareServer {
     }
 
     // expiresAt is real-world time (epoch milliseconds), so it runs out even while the server is off.
-    private record Meta(String name, UUID owner, String ownerName, long expiresAt) {
+    // mapId: the map showing its picture (PreviewMaps), or PreviewMaps.NONE.
+    private record Meta(String name, UUID owner, String ownerName, long expiresAt, int mapId) {
         boolean expired() {
             return System.currentTimeMillis() >= expiresAt;
+        }
+
+        Meta withMapId(int mapId) {
+            return new Meta(name, owner, ownerName, expiresAt, mapId);
         }
     }
 
@@ -136,6 +143,8 @@ public final class ShareServer {
         String name = ShareProtocol.cleanFileName(in.readString());
         int size = in.readInt();
         UUID target = in.readBoolean() ? in.readUuid() : null;
+        // Older clients send no picture.
+        byte[] preview = in.hasMore() && in.readBoolean() ? in.readBytes(ShareProtocol.PREVIEW_BYTES) : null;
         long now = System.currentTimeMillis();
 
         UPLOADS.values().removeIf(upload -> now - upload.startedAt > UPLOAD_TIMEOUT_MS);
@@ -187,7 +196,9 @@ public final class ShareServer {
             }
         }
 
-        UPLOADS.put(player.getUUID(), new Upload(transfer, name, size, target));
+        Upload upload = new Upload(transfer, name, size, target);
+        upload.preview = preview != null && preview.length == ShareProtocol.PREVIEW_BYTES ? preview : null;
+        UPLOADS.put(player.getUUID(), upload);
     }
 
     // ----- Blocks with a linked workbook (see LinkedWorkbooks) -----
@@ -309,6 +320,17 @@ public final class ShareServer {
                 }
 
                 writeFile(dataFile(server, upload.target), upload.data);
+
+                if (upload.preview != null) {
+                    int mapId = PreviewMaps.paint(server, meta.mapId(), upload.preview);
+
+                    if (mapId != meta.mapId()) {
+                        writeMeta(server, upload.target, meta.withMapId(mapId));
+                    }
+
+                    PreviewMaps.attachAll(player, upload.target, mapId);
+                }
+
                 LAST_UPLOAD.put(player.getUUID(), System.currentTimeMillis());
                 uploadResult(player, transfer, true, "Saved, and updated the shared copy");
                 return;
@@ -337,10 +359,14 @@ public final class ShareServer {
             String ownerName = player.getName().getString();
             long expiresAt = System.currentTimeMillis() + ShareProtocol.SHARE_LIFETIME_MS;
             writeFile(dataFile(server, id), upload.data);
-            writeMeta(server, id, new Meta(upload.name, player.getUUID(), ownerName, expiresAt));
+            int mapId = upload.preview == null ? PreviewMaps.NONE
+                    : PreviewMaps.paint(server, PreviewMaps.NONE, upload.preview);
+            writeMeta(server, id, new Meta(upload.name, player.getUUID(), ownerName, expiresAt, mapId));
             LAST_UPLOAD.put(player.getUUID(), System.currentTimeMillis());
 
-            give(player, SharedWorkbookItem.create(id, upload.name, ownerName, expiresAt));
+            ItemStack item = SharedWorkbookItem.create(id, upload.name, ownerName, expiresAt);
+            PreviewMaps.attach(item, mapId);
+            give(player, item);
             uploadResult(player, transfer, true,
                     "Shared! " + upload.name + " is in your inventory. It expires in 7 days");
         } catch (IOException exception) {
@@ -390,6 +416,7 @@ public final class ShareServer {
             return;
         }
 
+        PreviewMaps.attachAll(player, id, meta.mapId());
         sendWorkbook(player, id, meta.name(), data, meta.owner().equals(player.getUUID()),
                 meta.ownerName(), meta.expiresAt());
     }
@@ -710,7 +737,8 @@ public final class ShareServer {
                     // Workbooks shared before expiry existed get a week from their last change.
                     Long.parseLong(properties.getProperty("expiresAt",
                             String.valueOf(Files.getLastModifiedTime(file).toMillis()
-                                    + ShareProtocol.SHARE_LIFETIME_MS)))
+                                    + ShareProtocol.SHARE_LIFETIME_MS))),
+                    Integer.parseInt(properties.getProperty("mapId", String.valueOf(PreviewMaps.NONE)))
             );
         } catch (IOException | IllegalArgumentException exception) {
             return null;
@@ -723,6 +751,10 @@ public final class ShareServer {
         properties.setProperty("owner", meta.owner().toString());
         properties.setProperty("ownerName", meta.ownerName());
         properties.setProperty("expiresAt", String.valueOf(meta.expiresAt()));
+
+        if (meta.mapId() != PreviewMaps.NONE) {
+            properties.setProperty("mapId", String.valueOf(meta.mapId()));
+        }
 
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
 

@@ -26,6 +26,8 @@ public final class ShareProtocol {
     public static final int MAX_MESSAGE_BYTES = CHUNK_BYTES + 1024;
 
     // Client to server.
+    // UPLOAD_BEGIN: transfer, name, size, has target, [target], then optionally
+    // has preview, [preview: SheetPreview.BYTES map colors the client drew].
     public static final byte UPLOAD_BEGIN = 1;
     public static final byte UPLOAD_CHUNK = 2;
     public static final byte UPLOAD_END = 3;
@@ -71,6 +73,9 @@ public final class ShareProtocol {
 
     // A shared workbook is deleted from the server this long after it was shared.
     public static final long SHARE_LIFETIME_MS = 7L * 24 * 60 * 60 * 1000;
+
+    // A shared workbook's picture: one map's pixels (128 x 128 map colors).
+    public static final int PREVIEW_BYTES = 128 * 128;
 
     private static final int MAX_NAME_LENGTH = 80;
 
@@ -281,6 +286,11 @@ public final class ShareProtocol {
 
         public byte type() {
             return type;
+        }
+
+        /** Whether more fields follow (newer versions add optional ones at the end). */
+        public boolean hasMore() throws IOException {
+            return in.available() > 0;
         }
 
         public int readInt() throws IOException {

@@ -4,6 +4,11 @@ All notable changes to Excel on a Stick (formerly Excel Computer).
 
 Supported versions: Minecraft 1.20.1 (Fabric, Forge), 1.21.1, 1.21.10, 26.1.2 and 26.2 (Fabric, NeoForge).
 
+## 2.0.1.5 - Map view update (2026-11-11)
+
+### Added
+- **Shared workbook pictures**: sharing a workbook now draws a small picture of the sheet (a zoomed-out Excel window with the file name, headers, cells, fills, borders and text) on a locked map carried by the shared workbook item. Holding the item or putting it in an item frame shows the sheet like a map, in a window frame instead of the paper border.
+
 ## 2.0.1 - Draw update (2026-11-10)
 
 ### Added

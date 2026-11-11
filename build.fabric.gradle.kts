@@ -166,6 +166,12 @@ tasks {
         val mixinJava = "JAVA_${requiredJava.majorVersion}"
         filesMatching("*.mixins.json") { expand("java" to mixinJava) }
 
+        // Loom remaps mixin targets in the classes themselves ("static" remapping), and
+        // 26.1+ isn't obfuscated, so Fabric needs no refmap (only the Forge build has one).
+        filesMatching("excelcomputer.mixins.json") {
+            filter { line -> if (line.contains("\"refmap\"")) "" else line }
+        }
+
         // Recipes are written in the 1.21.2+ format ("P": "#minecraft:planks").
         // On 1.21.1 ingredients must be objects, so convert them while copying:
         // "#tag" becomes {"tag": "tag"} and "item" becomes {"item": "item"}.

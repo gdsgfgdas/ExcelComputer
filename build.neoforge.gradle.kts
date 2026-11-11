@@ -143,7 +143,11 @@ tasks {
         filesMatching("META-INF/neoforge.mods.toml") { expand(props) }
 
         val mixinJava = "JAVA_${requiredJava.majorVersion}"
-        filesMatching("*.mixins.json") { expand("java" to mixinJava) }
+        // NeoForge runs with Mojang's names, so the mixins need no refmap (only Forge 1.20.1 has one).
+        filesMatching("*.mixins.json") {
+            expand("java" to mixinJava)
+            filter { line -> if (line.contains("\"refmap\"")) "" else line }
+        }
 
         // Recipes are written in the 1.21.2+ format ("P": "#minecraft:planks").
         // On 1.21.1 ingredients must be objects, so convert them while copying:

@@ -255,6 +255,14 @@ public final class ShareClient {
      * @return null if the upload started, otherwise why it could not
      */
     public static String upload(Path file, UUID target, Consumer<String> listener) {
+        return upload(file, target, null, listener);
+    }
+
+    /**
+     * Like upload(file, target, listener), with a picture of the sheet
+     * (SheetPreview, may be null) that the item shows when held or framed.
+     */
+    public static String upload(Path file, UUID target, byte[] preview, Consumer<String> listener) {
         return upload(file, listener, null, (transfer, name, size) -> {
             ShareProtocol.Writer begin = new ShareProtocol.Writer(ShareProtocol.UPLOAD_BEGIN)
                     .writeInt(transfer)
@@ -266,8 +274,34 @@ public final class ShareClient {
                 begin.writeUuid(target);
             }
 
+            boolean hasPreview = preview != null && preview.length == SheetPreview.BYTES;
+            begin.writeBoolean(hasPreview);
+
+            if (hasPreview) {
+                begin.writeBytes(preview, 0, preview.length);
+            }
+
             return begin;
         });
+    }
+
+    /**
+     * Shares a workbook file that isn't open: draws its preview in the
+     * background first (sharing still works if that fails).
+     */
+    public static void shareWithPreview(Path file, Consumer<String> listener) {
+        if (!canShare()) {
+            listener.accept("This needs the server to have Excel on a Stick installed");
+            return;
+        }
+
+        SheetPreview.renderFileAsync(file).thenAccept(preview -> Minecraft.getInstance().execute(() -> {
+            String error = upload(file, null, preview, listener);
+
+            if (error != null) {
+                listener.accept(error);
+            }
+        }));
     }
 
     /**

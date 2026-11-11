@@ -70,7 +70,17 @@ legacyForge {
     }
 }
 
+// Mixins: 1.20.1 draws only vanilla filled maps as maps, so two small mixins let a
+// shared workbook's map picture show in hand and in item frames (see the mixin package).
+// The refmap maps their targets to the SRG names Forge runs with.
+mixin {
+    add(sourceSets.main.get(), "excelcomputer.refmap.json")
+    config("excelcomputer.mixins.json")
+}
+
 dependencies {
+    annotationProcessor("org.spongepowered:mixin:0.8.5:processor")
+
     for (library in bundledLibraries) {
         implementation(library)
         add(shadowBundle.name, library)
@@ -119,6 +129,9 @@ tasks {
         }
 
         filesMatching("META-INF/mods.toml") { expand(props) }
+        val mixinJava = "JAVA_${requiredJava.majorVersion}"
+        inputs.property("mixinJava", mixinJava)
+        filesMatching("*.mixins.json") { expand("java" to mixinJava) }
 
         // Recipes: ingredients must be objects, and a result names its "item" (1.20.1 format).
         filesMatching("data/*/recipe/*.json") {
@@ -157,6 +170,11 @@ tasks {
     shadowJar {
         archiveClassifier = ""
         configurations = listOf(shadowBundle)
+
+        // The mixin refmap (written by the annotation processor while compiling, see
+        // mixin {} above): Forge needs it to find the mixin targets by their SRG names.
+        dependsOn(compileJava)
+        from(layout.buildDirectory.file("mixin/excelcomputer.refmap.json"))
         dependencies {
             for (library in bundledLibraries) {
                 include(dependency("${library.group}:${library.name}"))
@@ -193,6 +211,8 @@ tasks {
         val name = project.property("mod.id")
         inputs.property("mod_id", name)
         from("../../LICENSE") { rename { "$it-$name" } }
+        // Forge 1.20.1 finds a mod's mixin configs through this manifest entry.
+        manifest.attributes("MixinConfigs" to "excelcomputer.mixins.json")
     }
 
     register<Copy>("buildAndCollect") {

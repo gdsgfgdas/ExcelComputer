@@ -14,6 +14,7 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.MapItem;
 import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.level.Level;
 //? if >=1.21 {
@@ -36,8 +37,13 @@ import java.util.function.Consumer;
  * A workbook shared through the server. The item only holds the workbook's
  * id, name, owner and expiry time; the file itself is stored in the world's
  * save folder (see ShareServer), so large workbooks never end up in item data.
+ *
+ * <p>It is a MapItem: it may carry a locked map with a picture of the sheet
+ * (see PreviewMaps), which Minecraft draws when the item is held or put in an
+ * item frame (on 1.20.1 with the help of the mixins in the mixin package).
+ * The map behaviors that don't fit are turned off.
  */
-public class SharedWorkbookItem extends Item {
+public class SharedWorkbookItem extends MapItem {
     private static final String KEY_ID = "excelcomputer_share_id";
     private static final String KEY_NAME = "excelcomputer_share_name";
     private static final String KEY_OWNER = "excelcomputer_share_owner";
@@ -145,6 +151,33 @@ public class SharedWorkbookItem extends Item {
         return InteractionResultHolder.success(player.getItemInHand(hand));
     }
     *///?}
+
+    // A map would add a banner marker when it clicks a banner; this one just opens (use).
+    @Override
+    public net.minecraft.world.InteractionResult useOn(net.minecraft.world.item.context.UseOnContext context) {
+        return net.minecraft.world.InteractionResult.PASS;
+    }
+
+    /** Whether this is a shared workbook with a picture to show like a map. */
+    public static boolean showsMap(ItemStack stack) {
+        if (!(stack.getItem() instanceof SharedWorkbookItem)) {
+            return false;
+        }
+
+        //? if >=1.21 {
+        return stack.has(DataComponents.MAP_ID);
+        //?} else {
+        /*return MapItem.getMapId(stack) != null;
+        *///?}
+    }
+
+    /** Hides the map's "Id #" and "Locked" tooltip lines (the item has its own). */
+    public static void hideMapTooltip(ItemStack stack) {
+        //? if >=1.21.5 {
+        TooltipDisplay display = stack.getOrDefault(DataComponents.TOOLTIP_DISPLAY, TooltipDisplay.DEFAULT);
+        stack.set(DataComponents.TOOLTIP_DISPLAY, display.withHidden(DataComponents.MAP_ID, true));
+        //?}
+    }
 
     // Shimmers like an enchanted item, so it stands out from blank Excel Paper (same texture).
     @Override

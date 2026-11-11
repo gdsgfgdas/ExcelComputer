@@ -51,6 +51,12 @@ public class MySharesScreen extends Screen {
         this.status = status;
     }
 
+    // Like the spreadsheet: the game keeps running behind the window, even in singleplayer.
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
     @Override
     protected void init() {
         if (shares == null && ShareClient.canShare()) {

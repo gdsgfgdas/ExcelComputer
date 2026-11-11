@@ -38,6 +38,12 @@ public class SharedWorkbookLoadingScreen extends Screen {
         failed = true;
     }
 
+    // Like the spreadsheet: the game keeps running behind the window, even in singleplayer.
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
     @Override
     protected void init() {
         this.addRenderableWidget(

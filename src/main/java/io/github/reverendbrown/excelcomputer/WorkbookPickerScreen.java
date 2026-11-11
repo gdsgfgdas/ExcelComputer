@@ -57,6 +57,12 @@ public class WorkbookPickerScreen extends Screen {
         }
     }
 
+    // Like the spreadsheet: the game keeps running behind the window, even in singleplayer.
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
     @Override
     protected void init() {
         positionLabel = null;
@@ -494,8 +500,8 @@ public class WorkbookPickerScreen extends Screen {
     }
 
     private void share(Path path) {
-        String error = ShareClient.upload(path, null, message -> this.status = message);
-        this.status = error != null ? error : "Sharing " + path.getFileName() + "...";
+        this.status = "Sharing " + path.getFileName() + "...";
+        ShareClient.shareWithPreview(path, message -> this.status = message);
     }
 
     // Opens the workbooks folder in the system's file explorer.

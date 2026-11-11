@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "io.github.reverendbrown.excelcomputer.mixin",
+  "compatibilityLevel": "${java}",
+  "refmap": "excelcomputer.refmap.json",
+  "mixins": [
+    "ItemFrameMixin"
+  ],
+  "client": [
+    "ItemInHandRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

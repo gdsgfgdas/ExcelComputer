@@ -10,6 +10,10 @@ version = "${version}"
 authors = "ReverendBrown with Claude AI"
 description = "Edit real Excel workbooks inside Minecraft."
 
+# A held shared workbook looks like a window (see the mixin package).
+[[mixins]]
+config = "excelcomputer.mixins.json"
+
 [[dependencies.${id}]]
 modId = "minecraft"
 type = "required"
